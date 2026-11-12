@@ -1,0 +1,11 @@
+# macOS Finder metadata
+.DS_Store
+
+# Optional in-tree build outputs (fixtures under tests/data stay versioned).
+/build/
+/build-*/
+/tests/upstream/target/
+
+# Local development plans, progress, and review records.
+/docs.local/
+/ROADMAP.local.md

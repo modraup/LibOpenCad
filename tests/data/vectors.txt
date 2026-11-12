@@ -1,0 +1,10 @@
+# case ax ay az bx by bz  (2D uses the XY components of the same pair)
+mixed 3 4 12 -2 1 2
+fractional -2.5 0.75 -4 1.25 -3 0.5
+orthogonal 1 0 0 0 1 0
+antiparallel 1 -2 3 -2 4 -6
+zero 0 0 0 2 -3 4
+signed_zero -0 0 -0 -1 2 3
+tiny 3e-150 -4e-150 1e-150 1 2 -1
+underflow 1e-200 -2e-200 3e-200 -2 3 1
+cancellation 1.000000007450580596923828125 1 0 1 0.999999992549419403076171875 0

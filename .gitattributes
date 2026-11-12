@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Preserve legacy code-page bytes and DXF record terminators.
+tests/data/*.dxf -text whitespace=cr-at-eol
+tests/data/*-binary.dxf binary
