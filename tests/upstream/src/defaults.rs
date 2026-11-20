@@ -11,7 +11,7 @@ pub fn generate(path: &str) -> acadrust::Result<()> {
     let mut lines = text.lines();
     let mut header_variable = String::new();
     let mut output = String::from(
-        "// SPDX-License-Identifier: MPL-2.0\n// acadrust acad0df2bc491d6ac909dc7491c508bb8e6ebed8, CadDocument::initialize_defaults\n// and io/dxf/writer section defaults. Regenerate with generate-defaults.\nconstexpr struct { int code; const char* value; } default_pairs[] = {\n");
+        "// SPDX-License-Identifier: MPL-2.0\n// acadrust 52034a673ff59bf6936ebf01ec794b07a97df246, CadDocument::initialize_defaults\n// and io/dxf/writer section defaults. Regenerate with generate-defaults.\nconstexpr struct { int code; const char* value; } default_pairs[] = {\n");
     while let Some(code) = lines.next() {
         let code: u16 = code.trim().parse().unwrap();
         let mut value = lines.next().unwrap().to_string();
@@ -75,17 +75,17 @@ pub fn verify(format: &str, prefix: &str) -> acadrust::Result<()> {
     let added = DxfReader::from_file(format!("{prefix}-added.dxf"))?.read()?;
     assert_eq!(added.layers.len(), actual.layers.len() + 1);
     assert_eq!(added.line_types.len(), actual.line_types.len() + 1);
-    assert_eq!(added.layers.get("新增图层").unwrap().handle.value(), 0x32);
+    assert_eq!(added.layers.get("新增图层").unwrap().handle.value(), 0x33);
     assert_eq!(added.layers.get("新增图层").unwrap().line_type, "新增虚线");
     assert_eq!(
         added.line_types.get("新增虚线").unwrap().handle.value(),
-        0x31
+        0x32
     );
     assert_eq!(
         added.line_types.get("新增虚线").unwrap().pattern_length,
         0.75
     );
-    assert_eq!(added.header.handle_seed, 0x33);
+    assert_eq!(added.header.handle_seed, 0x34);
     assert_eq!(added.objects, actual.objects);
     assert_eq!(added.block_records, actual.block_records);
     Ok(())

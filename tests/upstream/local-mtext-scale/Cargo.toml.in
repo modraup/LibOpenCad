@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-mtext-scale-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-mtext-scale-oracle"
+path = "@LIBOPENCAD_MTEXT_SCALE_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-stage8-drawing-vars-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-stage8-drawing-vars-oracle"
+path = "@LIBOPENCAD_STAGE8_DRAWING_VARS_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

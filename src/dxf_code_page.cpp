@@ -148,6 +148,14 @@ void append_cif(std::string& out, unsigned unit) {
 }
 } // namespace
 
+bool known_code_page(std::string_view declaration) {
+    std::string name(declaration);
+    for(char& c:name)if(c>='A' && c<='Z')c+='a'-'A';
+    if(name=="utf-8" || name=="utf8" || name=="ascii" || name=="unicode")return true;
+    if(name.compare(0,4,"iso_")==0)name.erase(3,1);
+    for(const auto& a:aliases)if(name==a.dxf)return true;
+    return false;
+}
 const char* legacy_page(std::string_view version, std::string_view declaration) {
     if (version.size() != 6 || (version.substr(0, 2) != "AC" && version.substr(0, 2) != "AD") ||
         version.substr(2) >= "1021" || declaration.empty()) return nullptr;
@@ -159,20 +167,197 @@ const char* legacy_page(std::string_view version, std::string_view declaration) 
     return "CP1252"; // Same fallback as encoding_from_code_page.
 }
 
-std::u32string symbol_name_key(std::string_view utf8) {
+std::u32string utf8_scalars(std::string_view utf8) {
     Converter decoder("UTF-32LE", "UTF-8");
     const auto bytes = decoder.convert(utf8);
-    if (!bytes) throw std::invalid_argument("Invalid UTF-8 symbol name");
-    std::u32string key;
+    if (!bytes) throw std::invalid_argument("Invalid UTF-8 text");
+    std::u32string result;
     for (std::size_t i = 0; i < bytes->size(); i += 4) {
         char32_t c = 0;
         for (unsigned j = 0; j < 4; ++j)
             c |= static_cast<char32_t>(static_cast<unsigned char>((*bytes)[i + j])) << (8 * j);
+        result.push_back(c);
+    }
+    return result;
+}
+
+std::string utf8_string(std::u32string_view scalars) {
+    std::string bytes;
+    for (auto c : scalars) {
+        if (c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff))
+            throw std::invalid_argument("Invalid Unicode scalar");
+        for (unsigned j = 0; j < 4; ++j) bytes.push_back(static_cast<char>((c >> (8 * j)) & 0xff));
+    }
+    auto result = Converter("UTF-8", "UTF-32LE").convert(bytes);
+    if (!result) throw std::invalid_argument("Invalid Unicode text");
+    return *result;
+}
+
+void valid_symbol_name(std::string_view name) {
+    if(name.empty() || name.find_first_of("<>/\\\":;?*|,=`")!=name.npos ||
+       std::any_of(name.begin(),name.end(),[](unsigned char c){return c<32;}))
+        throw std::invalid_argument("Invalid symbol name");
+    const auto key=detail::symbol_name_key(name); // Also validate UTF-8.
+    if(std::any_of(key.begin(),key.end(),[](char32_t c){return c<32 || (c>=127 && c<=159);}))
+        throw std::invalid_argument("Control character in symbol name");
+}
+std::u32string symbol_name_key(std::string_view utf8) {
+    auto key = utf8_scalars(utf8);
+    for (auto& c : key) {
         const auto found = std::lower_bound(std::begin(name_uppercase), std::end(name_uppercase), c,
             [](const auto& mapping, char32_t value) { return mapping.first < value; });
-        key.push_back(found != std::end(name_uppercase) && found->first == c ? found->second : c);
+        if (found != std::end(name_uppercase) && found->first == c) c = found->second;
     }
     return key;
+}
+
+namespace {
+struct GbkUnit {
+    std::size_t length;
+    bool valid;
+    unsigned pointer = 0;
+};
+
+// encoding_rs shares this framing between GBK and GB18030. An invalid
+// ASCII trail is replayed; a non-ASCII trail belongs to the failed sequence.
+GbkUnit gbk_unit(std::string_view s) {
+    const auto lead = static_cast<unsigned char>(s[0]);
+    if (s.size() == 1 || lead == 0xff) return {1, false};
+    const auto trail = static_cast<unsigned char>(s[1]);
+    if (trail == 0xff) return {2, false};
+    if (trail >= 0x40 && trail != 0x7f) return {2, true};
+    if (trail < '0' || trail > '9') return {1, false};
+    if (s.size() == 2) return {2, false};
+    const auto third = static_cast<unsigned char>(s[2]);
+    if (third < 0x81 || third > 0xfe) return {1, false};
+    if (s.size() == 3) return {3, false};
+    if (s[3] < '0' || s[3] > '9') return {1, false};
+    const unsigned pointer = (((lead - 0x81) * 10 + trail - '0') * 126 + third - 0x81) * 10 + s[3] - '0';
+    return {4, pointer <= 39419 || (pointer >= 189000 && pointer <= 1237575), pointer};
+}
+
+std::string gbk_four_byte_text(std::string_view bytes, unsigned pointer) {
+    if (pointer < 189000) {
+        auto scalar = Converter("UTF-8", "GB18030").convert(bytes);
+        if (!scalar) throw std::runtime_error("Unavailable GB18030 mapping");
+        return *scalar;
+    }
+    const char32_t scalar = pointer - 189000 + 0x10000;
+    return utf8_string({&scalar, 1});
+}
+} // namespace
+
+// A trail byte in GBK, Big5 or Shift-JIS can look like a backslash. Inspect
+// escapes only at character boundaries and retain the untouched source bytes.
+void recover_legacy_text(std::string& bytes, const char* page,
+                         const std::function<void(LegacyTextError, std::size_t)>& report) {
+    const std::string_view input(bytes);
+    const auto first = input.find("\\U+");
+    const auto non_ascii = std::find_if(input.begin(), input.end(), [](unsigned char c) { return c >= 0x80; });
+    if (first == input.npos && non_ascii == input.end()) return;
+
+    const bool gbk = std::string_view(page) == "GBK";
+    std::optional<Converter> decoder;
+    if (!gbk && non_ascii != input.end()) decoder.emplace("UTF-8", page);
+    std::string output;
+    std::size_t copied = 0;
+    auto replace = [&](std::size_t at, std::size_t length, std::string_view replacement) {
+        output.append(input.substr(copied, at - copied));
+        output.append(replacement);
+        copied = at + length;
+    };
+    for (std::size_t i = 0; i < input.size();) {
+        const auto rest = input.substr(i);
+        if (rest.substr(0, 3) == "\\U+") {
+            auto unit = hex4(rest.substr(3));
+            if (!unit) {
+                report(LegacyTextError::MalformedEscape, i);
+                // Escape the backslash itself. One CIF decoding pass yields
+                // the original literal, and the saved drawing is strict-readable.
+                replace(i, 1, "\\U+005C");
+                ++i;
+            } else if (*unit >= 0xd800 && *unit <= 0xdfff) {
+                if (*unit < 0xdc00 && rest.substr(7, 3) == "\\U+") {
+                    auto low = hex4(rest.substr(10));
+                    if (low && *low >= 0xdc00 && *low <= 0xdfff) {
+                        i += 14;
+                        continue;
+                    }
+                }
+                report(LegacyTextError::UnpairedSurrogate, i);
+                replace(i, 7, "");
+                i += 7;
+            } else {
+                i += 7;
+            }
+            continue;
+        }
+        const auto lead = static_cast<unsigned char>(rest[0]);
+        if (lead < 0x80 || (gbk && lead == 0x80)) {
+            ++i;
+            continue;
+        }
+        std::size_t length = 1;
+        if (gbk) {
+            const auto unit = gbk_unit(rest);
+            length = unit.length;
+            if (unit.valid) {
+                // Four-byte input also needs to work with native two-byte GBK codecs.
+                if (length == 4)
+                    replace(i, length, to_legacy(gbk_four_byte_text(rest.substr(0, length), unit.pointer), page));
+                i += length;
+                continue;
+            }
+        } else {
+            // The supported non-GBK legacy pages use one- or two-byte characters.
+            if (decoder->convert(rest.substr(0, 1))) {
+                ++i;
+                continue;
+            }
+            if (rest.size() >= 2 && decoder->convert(rest.substr(0, 2))) {
+                i += 2;
+                continue;
+            }
+        }
+        report(LegacyTextError::InvalidBytes, i);
+        replace(i, length, "\\U+FFFD");
+        i += length;
+    }
+    if (copied) {
+        output.append(input.substr(copied));
+        bytes = std::move(output);
+    }
+}
+
+// Rust's undecorated text reader uses Latin-1 for an invalid UTF-8 line.
+// Binary strings use Unicode maximal-subpart replacement.
+std::string decode_undeclared_text(std::string_view bytes, bool binary) {
+    std::string text;
+    for (std::size_t i = 0; i < bytes.size();) {
+        const auto c = static_cast<unsigned char>(bytes[i]);
+        if (c < 128) {
+            text += bytes[i++];
+            continue;
+        }
+        const unsigned width = c < 0xc2 || c > 0xf4 ? 0 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+        unsigned used = 1;
+        while (used < width && used < bytes.size() - i) {
+            const auto next = static_cast<unsigned char>(bytes[i + used]);
+            if (next < 0x80 || next > 0xbf ||
+                (used == 1 && ((c == 0xe0 && next < 0xa0) || (c == 0xed && next >= 0xa0) ||
+                               (c == 0xf0 && next < 0x90) || (c == 0xf4 && next >= 0x90)))) break;
+            ++used;
+        }
+        if (used == width) text.append(bytes.substr(i, used));
+        else if (!binary) {
+            text = *Converter("UTF-8", "ISO-8859-1").convert(bytes);
+            break;
+        } else text += "\xEF\xBF\xBD";
+        i += used;
+    }
+    if (text.find("\\M+") != text.npos) text = decode_mif(text);
+    if (text.find("\\U+") != text.npos) text = decode_cif(text);
+    return text;
 }
 
 std::string from_legacy(std::string_view bytes, const char* page) {

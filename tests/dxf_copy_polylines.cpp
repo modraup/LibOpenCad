@@ -196,8 +196,8 @@ void boundaries(const char* input) {
         {auto d=valid;at(d,ids[3])[1].second="0";reject(d,ids[0]);}
         {auto d=valid;for(auto& [code,value]:at(d,ids[3]))if(code==330)value="90";reject(d,ids[0]);}
     }
-    // SPLINE remains outside this phase; BLOCKS sequences share the typed copy path.
-    {auto d=valid;at(d,ids[0])[0].second="SPLINE";reject(d,ids[0]);}
+    // Unknown custom types remain unsupported; BLOCKS sequences share the typed copy path.
+    {auto d=valid;at(d,ids[0])[0].second="CUSTOM_SPLINE";reject(d,ids[0]);}
     {auto d=valid;Records moved;for(const auto& id:ids)moved.push_back(at(d,id));drop(d,ids);
      auto end=std::find_if(d.begin(),d.end(),[](const auto& r){return r.front().second=="ENDBLK";});
      d.insert(end,moved.begin(),moved.end());

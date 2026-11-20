@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.16)
+project(stage8_package_probe LANGUAGES CXX)
+find_package(LibOpenCad REQUIRED)
+add_executable(stage8_package_probe "${PROBE_SRC}")
+target_link_libraries(stage8_package_probe PRIVATE LibOpenCad::libopencad)

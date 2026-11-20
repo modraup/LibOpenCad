@@ -14,11 +14,11 @@ namespace {
 using Pair = std::pair<int,std::string>;
 using Record = std::vector<Pair>;
 using Records = std::vector<Record>;
-void check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
-std::string hex(std::uint64_t h) { std::ostringstream out; out << std::hex << std::uppercase << h; return out.str(); }
-std::string save(const DxfDocument& doc) { std::ostringstream out; doc.write(out); return out.str(); }
-DxfDocument read(const std::string& bytes) { std::istringstream in(bytes); return DxfDocument::read(in); }
-Records records(const std::string& bytes, bool binary) {
+inline void check(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+inline std::string hex(std::uint64_t h) { std::ostringstream out; out << std::hex << std::uppercase << h; return out.str(); }
+inline std::string save(const DxfDocument& doc) { std::ostringstream out; doc.write(out); return out.str(); }
+inline DxfDocument read(const std::string& bytes) { std::istringstream in(bytes); return DxfDocument::read(in); }
+inline Records records(const std::string& bytes, bool binary) {
     std::istringstream in(bytes);
     if (binary) in.ignore(detail::binary_signature.size());
     Records result;
@@ -37,7 +37,7 @@ Records records(const std::string& bytes, bool binary) {
     }
     return result;
 }
-std::string encode(const Records& data, bool binary) {
+inline std::string encode(const Records& data, bool binary) {
     std::ostringstream out;
     if (binary) out.write(detail::binary_signature.data(), detail::binary_signature.size());
     for (const auto& record : data) for (const auto& [code,value] : record) {
@@ -46,7 +46,7 @@ std::string encode(const Records& data, bool binary) {
     }
     return out.str();
 }
-std::string identity(const Record& record) {
+inline std::string identity(const Record& record) {
     if (record.front().second == "SECTION") return {};
     for (const auto& [code,value] : record) {
         if (code == 100) break;
@@ -64,7 +64,7 @@ inline void inject(Records& data, const std::string& handle, const std::vector<s
     group.emplace_back(102,"}");
     it->insert(at, group.begin(), group.end());
 }
-void drop(Records& data, const std::vector<std::string>& handles) {
+inline void drop(Records& data, const std::vector<std::string>& handles) {
     data.erase(std::remove_if(data.begin(), data.end(), [&](const auto& r) {
         return std::find(handles.begin(), handles.end(), identity(r)) != handles.end();
     }), data.end());
@@ -74,15 +74,15 @@ inline void write(const DxfDocument& doc, const std::string& path) {
     out.exceptions(std::ios::badbit | std::ios::failbit);
     out.open(path,std::ios::binary); doc.write(out); out.close();
 }
-Record& at(Records& data, const std::string& h) {
+inline Record& at(Records& data, const std::string& h) {
     auto i=std::find_if(data.begin(),data.end(),[&](const auto& r){return identity(r)==h;});
     check(i!=data.end(),"missing fixture record"); return *i;
 }
-void extension(Records& data,const std::string& owner,const std::string& dictionary) {
+inline void extension(Records& data,const std::string& owner,const std::string& dictionary) {
     auto& r=at(data,owner);
     r.insert(r.begin()+2,{{102,"{ACAD_XDICTIONARY"},{360,dictionary},{102,"}"}});
 }
-void append(Records& data, Record r, bool binary) {
+inline void append(Records& data, Record r, bool binary) {
     if(binary) for(auto& [code,value]:r) value=detail::binary_value_from_text(code,value);
     auto section=std::find_if(data.begin(),data.end(),[](const auto& r){return r.front().second=="SECTION" && r.size()>1 && r[1].second=="OBJECTS";});
     check(section!=data.end(),"OBJECTS section");

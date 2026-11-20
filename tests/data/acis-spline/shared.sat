@@ -1,0 +1,9 @@
+700 0 0 0
+8 acadrust 8 ACIS 7.0 0 
+1 1e-006 1e-010
+spline-surface $-1 -1 $-1 reversed { exactsur full nubs 1 1 open open none none 2 2 0 1 1 1 0 1 1 1 0 0 0 1 0 0 0 1 1 1 1 2 0 } I I I I #
+bs3-surface $-1 -1 $-1 forward { ref 0 } I I I I #
+meshsurf-surface $-1 -1 $-1 forward { ref 0 } I I I I #
+intcurve-curve $-1 -1 $-1 reversed { exactcur full nubs 1 periodic 2 0 1 1 1 0 0 0 1 2 3 0 } I I #
+bs3-curve $-1 -1 $-1 forward { ref 1 } I I #
+End-of-ACIS-data

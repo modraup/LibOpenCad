@@ -1,0 +1,8 @@
+700 0 0 0
+8 acadrust 8 ACIS 7.0 0 
+1 1e-006 1e-010
+intcurve-curve $-1 -1 $-1 reversed { par_int_cur full nubs 1 open 2 0 1 1 1 0 0 0 1 2 3 0 null_surface null_surface nubs 1 open 2 0 1 1 1 0 0 2 3 nurbs 1 open 2 0 1 1 1 1 2 1 3 4 0.5 I I 0 0 0 } I I #
+intcurve-curve $-1 -1 $-1 forward { ref 0 } I I #
+pcurve $-1 -1 $-1 -1 forward $1 2 -3 #
+pcurve $-1 -1 $-1 2 reversed $0 -2 3 #
+End-of-ACIS-data

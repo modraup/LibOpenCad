@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-app-id-usage-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-app-id-usage-oracle"
+path = "@LIBOPENCAD_APP_ID_USAGE_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-layer-state-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-layer-state-oracle"
+path = "@LIBOPENCAD_LAYER_STATE_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

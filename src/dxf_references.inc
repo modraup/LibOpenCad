@@ -7,8 +7,8 @@ std::vector<std::pair<std::size_t,bool>> DxfDocument::reference_positions(const 
         const auto& p=r.pairs_[i];
         if(!depth && p.code==100 && r.type()=="XRECORD" && p.value=="AcDbXrecord") payload=true;
         if(payload) {if(pointer_code(p.code))result.push_back({i,true});continue;}
-        if(p.code==1001)xdata=true;
-        if(p.code==101)opaque=true;
+        if(!depth && p.code==1001){xdata=true;opaque=false;}
+        if(!depth && p.code==101)opaque=true;
         if(p.code==102) {
             if(!p.value.empty() && p.value.front()=='{') {
                 if(depth==0) {
@@ -63,9 +63,68 @@ std::vector<ReferenceIssue> DxfDocument::reference_issues() const {
     for(std::size_t i=0;i<records_.size();++i) {
         const auto& r=records_[i];const bool entity=std::find(entity_records_.begin(),entity_records_.end(),i)!=entity_records_.end();
         std::visit([&](const DxfRecord& value){inspect(value,entity);},r);
-        if(const auto* c=sequence(r)){for(const auto& v:c->vertices_)inspect(v,true,handle_value(c->handle()));if(c->seqend_)inspect(*c->seqend_,true,handle_value(c->handle()));}
+        if(const auto* c=sequence(r)){for(const auto& v:c->children_)inspect(v,true,handle_value(c->handle()));if(c->seqend_)inspect(*c->seqend_,true,handle_value(c->handle()));}
     }
+    // Match upstream audit's owner back-links. The first OBJECTS dictionary
+    // is the named-object root; additional null-owner objects are not roots.
+    std::string section;
+    const DxfRecord* root = nullptr;
+    for (std::size_t i = 0; i < records_.size(); ++i) {
+        const auto& r = record_at({i, std::nullopt, false});
+        if (r.type() == "SECTION") section = r.field("", 2);
+        else if (r.type() == "ENDSEC") section.clear();
+        else if (section == "OBJECTS" && r.type() == "DICTIONARY" && !root) root = &r;
+        if (section != "OBJECTS" || r.handle().empty()) continue;
+        const auto owner_id = parse_handle(r.owner_handle());
+        if ((!owner_id || !*owner_id) && &r != root) {
+            result.push_back({r.handle(),330,r.owner_handle(),ReferenceStatus::MissingOwner,std::nullopt});
+            continue;
+        }
+        const auto* owner = get_record(r.owner_handle());
+        if (!owner || !owner_id || !*owner_id) continue;
+        bool checked = false, listed = false;
+        const auto id = parse_handle(r.handle());
+        if (owner->type() == "DICTIONARY" || owner->type() == "ACDBDICTIONARYWDFLT") {
+            checked = true;
+            const auto fields = owner->subclass_fields("AcDbDictionary");
+            for (std::size_t n = 1; n < fields.size(); ++n)
+                if (fields[n-1].code == 3 && (fields[n].code == 350 || fields[n].code == 360)
+                    && parse_handle(fields[n].value) == id) listed = true;
+        } else if (owner->type() == "FIELD") {
+            checked = true;
+            for (const auto& p : owner->subclass_fields("AcDbField"))
+                if (p.code == 360 && parse_handle(p.value) == id) listed = true;
+        }
+        if (checked && !listed)
+            result.push_back({r.handle(),330,r.owner_handle(),ReferenceStatus::UnlistedChild,std::nullopt});
+    }
+    std::unordered_set<std::uint64_t> attdef_owners;
+    for_each<DxfAttribute>([&](const auto& e) {
+        if (e.type() == "ATTDEF") attdef_owners.insert(handle_value(e.owner_handle()));
+    });
+    for_each<DxfBlock>([&](const auto& b) {
+        if ((b.flags() & 2) && !attdef_owners.count(handle_value(b.owner_handle())))
+            result.push_back({b.handle(),70,b.owner_handle(),ReferenceStatus::StaleAttributeFlag,SymbolTable::BlockRecord});
+    });
     return result;
+}
+std::size_t DxfDocument::repair_attribute_definition_flags() {
+    std::unordered_set<std::uint64_t> attdef_owners;
+    for_each<DxfAttribute>([&](const auto& e) {
+        if (e.type() == "ATTDEF") attdef_owners.insert(handle_value(e.owner_handle()));
+    });
+    // Stage by record position, not handle: malformed duplicate identities
+    // must not cause a different block's flags to be cleared.
+    DxfDocument staged = *this;
+    std::size_t count = 0;
+    staged.for_each<DxfBlock>([&](auto& b) {
+        if ((b.flags() & 2) && !attdef_owners.count(handle_value(b.owner_handle()))) {
+            b.set_flags(b.flags() & ~2);
+            ++count;
+        }
+    });
+    if (count) *this = std::move(staged);
+    return count;
 }
 std::size_t DxfDocument::repair_references(const std::vector<HandleReplacement>& replacements) {
     auto key=[](std::string_view s){const auto n=parse_handle(s);return n?hex_handle(*n):std::string(trim(s));};
@@ -85,7 +144,7 @@ std::size_t DxfDocument::repair_references(const std::vector<HandleReplacement>&
         p.value=found->second;++changed;
     }};
     for(auto& r:staged.records_) {std::visit(rewrite,r);if(auto* c=sequence(r)){
-        for(auto& v:c->vertices_)rewrite(v);if(c->seqend_)rewrite(*c->seqend_);}}
+        for(auto& v:c->children_)rewrite(v);if(c->seqend_)rewrite(*c->seqend_);}}
     staged.rebuild_indexes();
     // Do not introduce new ownership cycles while repairing an otherwise valid relationship.
     for(const auto& issue:staged.reference_issues()) if(issue.status==ReferenceStatus::OwnerCycle &&
@@ -108,10 +167,35 @@ std::uint64_t DxfDocument::insert_object(DxfRecord object) {
         if(r.type()=="ENDSEC") {if(section=="OBJECTS"){if(position)throw std::invalid_argument("Multiple OBJECTS sections");position=i;}section.clear();}
         if(r.type()=="EOF")eof=i;
     }
-    if(position)records_.insert(records_.begin()+*position,std::move(object));
+    Record entry=object;
+    for(const auto& c:classes())if(c.name==object.type()&&!c.is_entity&&object.type()!="XRECORD"&&object.type()!="ACDBDICTIONARYWDFLT"&&object.type()!="ACDBPLACEHOLDER"&&object.type()!="PLOTSETTINGS"){DxfSemanticObject value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);break;}
+
+    if(object.type()=="GROUP" || object.type()=="SCALE" || object.type()=="SORTENTSTABLE" || object.type()=="SPATIAL_FILTER" || object.type()=="DICTIONARYVAR" || object.type()=="DBCOLOR" || object.type()=="WIPEOUTVARIABLES"){DxfAuxiliaryObject value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type() == "BREAKDATA" || object.type() == "BREAKPOINTREF" || object.type() == "ACDSRECORD" || object.type() == "ACDSSCHEMA" || object.type() == "DUMMY" || object.type() == "IDBUFFER" || object.type() == "INDEX" || object.type() == "LAYER_INDEX" || object.type() == "LONG_TRANSACTION" || object.type() == "OBJECT_PTR" || object.type() == "PARTIAL_VIEWING_FILTER" || object.type() == "ACDBPOINTCLOUDDEF" || object.type() == "ACDBPOINTCLOUDDEF_EX" || object.type() == "ACDBPOINTCLOUDDEF_REACTOR" || object.type() == "ACDBPOINTCLOUDDEF_REACTOR_EX" || object.type() == "ACDBPOINTCLOUDCOLORMAP" || object.type() == "NAVISWORKSMODELDEF" || object.type() == "CONTEXTDATAMANAGER"){DxfDataObject value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+
+    if(known_object_context(object.type())){DxfObjectContext value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+
+    if(object.type()=="VISUALSTYLE" || object.type()=="GEODATA"){DxfDrawingObject value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(is_class_object_name(object.type())){DxfClassObject value;value.version_=version_;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="ACAD_PROXY_OBJECT"){DxfProxyObject value;value.version_=version_;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="FIELD"){DxfField value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="FIELDLIST"){DxfFieldList value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="MATERIAL"){DxfMaterial value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="IMAGEDEF"){DxfImageDefinition value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="IMAGEDEF_REACTOR"){DxfImageReactor value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="RASTERVARIABLES"){DxfRasterVariables value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="PDFDEFINITION" || object.type()=="DWFDEFINITION" || object.type()=="DGNDEFINITION"){DxfUnderlayDefinition value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="CELLSTYLEMAP"){DxfCellStyleMap value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="TABLEGEOMETRY"){DxfTableGeometry value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="TABLECONTENT" || object.type()=="TABLETEMPLATE"){DxfTableContent value;static_cast<DxfRecord&>(value)=object;entry=std::move(value);}
+    if(object.type()=="TABLESTYLE"){DxfTableStyle style;static_cast<DxfRecord&>(style)=object;entry=std::move(style);}
+    if(object.type()=="MLEADERSTYLE"){DxfMultiLeaderStyle style;static_cast<DxfRecord&>(style)=object;entry=std::move(style);}
+    if(object.type()=="MLINESTYLE"){DxfMLineStyle style;static_cast<DxfRecord&>(style)=object;entry=std::move(style);}
+    if(object.type()=="LAYOUT"){DxfLayout layout;static_cast<DxfRecord&>(layout)=std::move(object);entry=std::move(layout);}
+    if(position)records_.insert(records_.begin()+*position,std::move(entry));
     else {
         auto start=make_record("SECTION");start.set_field("",2,"OBJECTS");
-        std::vector<Record> added{std::move(start),std::move(object),make_record("ENDSEC")};
+        std::vector<Record> added{std::move(start),std::move(entry),make_record("ENDSEC")};
         records_.insert(records_.begin()+eof,added.begin(),added.end());
     }
     rebuild_indexes();return id;
@@ -144,6 +228,11 @@ std::uint64_t DxfDocument::add_extension_dictionary(std::string_view owner_handl
     staged.rebuild_indexes();*this=std::move(staged);return id;
 }
 std::uint64_t DxfDocument::add_dictionary_object(std::string_view parent,std::string name,DxfRecord object) {
+    DxfDocument staged=*this;
+    const auto id=staged.add_dictionary_object_impl(parent,std::move(name),std::move(object));
+    *this=std::move(staged);return id;
+}
+std::uint64_t DxfDocument::add_dictionary_object_impl(std::string_view parent,std::string name,DxfRecord object) {
     const auto found=handle_index_.find(handle_value(parent));
     if(found==handle_index_.end() || found->second.size()!=1)throw std::invalid_argument("Parent dictionary must resolve uniquely");
     const auto& dict=record_at(found->second.front());
@@ -201,7 +290,7 @@ std::size_t DxfDocument::repair_symbol_references(SymbolTable table,std::string_
         auto& p=r.pairs_[at];if(detail::symbol_name_key(r.decode_string(p.value))==key && r.decode_string(p.value)!=canonical){p.value=r.encode_string(canonical);++changed;}
     }};
     for(auto& r:staged.records_) {std::visit(rewrite,r);if(auto* c=sequence(r)){
-        for(auto& v:c->vertices_)rewrite(v);if(c->seqend_)rewrite(*c->seqend_);}}
+        for(auto& v:c->children_)rewrite(v);if(c->seqend_)rewrite(*c->seqend_);}}
     staged.rebuild_indexes();*this=std::move(staged);return changed;
 }
 
@@ -242,7 +331,7 @@ std::size_t DxfDocument::repair_entity_owners() {
                     throw std::invalid_argument("Cannot assign a child to an ambiguous parent identity");
                 child.set_field("",330,r.handle());++changed;
             };
-            for(auto& child:c->vertices_)assign(child);if(c->seqend_)assign(*c->seqend_);
+            for(auto& child:c->children_)assign(child);if(c->seqend_)assign(*c->seqend_);
         }
         if(r.type()=="ENDBLK")block_name.clear();
     }

@@ -4,6 +4,7 @@
 # Optional in-tree build outputs (fixtures under tests/data stay versioned).
 /build/
 /build-*/
+/Testing/
 /tests/upstream/target/
 
 # Local development plans, progress, and review records.

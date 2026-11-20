@@ -52,6 +52,30 @@ struct Matrix4 {
     bool operator!=(const Matrix4& rhs) const { return !(*this == rhs); }
 };
 
+// Mirrors keep text readable by default (MIRRTEXT=0). Width is the measured
+// text advance after height/width factors; absent/invalid widths use Rust's estimate.
+struct MirrorOptions {
+    bool mirror_text = false;
+    bool mirror_hatch = false;
+    std::optional<double> text_width;
+};
+
+struct Transform;
+
+// rust entities/modification/mirror3d::MirrorPlane.
+struct MirrorPlane {
+    static MirrorPlane point_normal(Vector3 point, Vector3 normal);
+    static MirrorPlane three_point(Vector3 first, Vector3 second, Vector3 third);
+    static MirrorPlane xy(Vector3 point);
+    static MirrorPlane yz(Vector3 point);
+    static MirrorPlane zx(Vector3 point);
+    Transform transform() const;
+
+  private:
+    enum class Kind { PointNormal, ThreePoint, XY, YZ, ZX } kind_ = Kind::XY;
+    Vector3 a_{}, b_{}, c_{};
+};
+
 struct Transform {
     Matrix4 matrix;
     static Transform identity() { return {}; }

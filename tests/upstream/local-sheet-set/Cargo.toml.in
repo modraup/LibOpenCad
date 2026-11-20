@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-sheet-set-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-sheet-set-oracle"
+path = "@LIBOPENCAD_SHEET_SET_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

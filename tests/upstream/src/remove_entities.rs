@@ -6,7 +6,7 @@ fn compare(original: &CadDocument, actual: &CadDocument, reference: &CadDocument
            deleted: &[u64], binary: bool) -> acadrust::Result<()> {
     assert_eq!(actual.entities().count(), 6 - deleted.len());
     assert_eq!(actual.header, original.header);
-    assert_eq!(actual.header.handle_seed, 0x39);
+    assert_eq!(actual.header.handle_seed, 0x3A);
     assert_eq!(actual.layers, original.layers);
     assert_eq!(actual.line_types, original.line_types);
     assert_eq!(actual.text_styles, original.text_styles);
@@ -50,9 +50,9 @@ pub fn verify(before: &str, prefix: &str) -> acadrust::Result<()> {
     let binary = std::fs::read(before)?.starts_with(b"AutoCAD Binary DXF\r\n\x1a\0");
     assert_eq!(original.entities().count(), 6);
     for (suffix, deleted) in [
-        ("first", vec![0x33,0x37,0x35]),
-        ("second", vec![0x38,0x34,0x36]),
-        ("empty", vec![0x33,0x37,0x35,0x36,0x34,0x38]),
+        ("first", vec![0x34,0x38,0x36]),
+        ("second", vec![0x39,0x35,0x37]),
+        ("empty", vec![0x34,0x38,0x36,0x37,0x35,0x39]),
     ] {
         let mut reference = original.clone();
         for &value in &deleted {
@@ -67,16 +67,16 @@ pub fn verify(before: &str, prefix: &str) -> acadrust::Result<()> {
         compare(&original, &actual, &reference, &deleted, binary)?;
     }
     let mut reference = original.clone();
-    for value in 0x33..=0x38 { reference.remove_entity(Handle::new(value)).unwrap(); }
+    for value in 0x34..=0x39 { reference.remove_entity(Handle::new(value)).unwrap(); }
     let new_handle = reference.add_entity(EntityType::Line(Line::from_coords(9.,8.,7.,6.,5.,4.)))?;
-    assert_eq!(new_handle.value(), 0x39);
+    assert_eq!(new_handle.value(), 0x3A);
     let mut writer = DxfWriter::new(&reference);
     writer.set_binary(binary);
     let expected = DxfReader::from_reader(Cursor::new(writer.write_to_vec()?))?.read()?;
     let readded = DxfReader::from_file(format!("{prefix}-readded.dxf"))?.read()?;
     assert_eq!(readded.entities().count(), 1);
     assert_eq!(readded.get_entity(new_handle), expected.get_entity(new_handle));
-    assert_eq!(readded.header.handle_seed, 0x3A);
+    assert_eq!(readded.header.handle_seed, new_handle.value() + 1);
     assert_eq!(readded.model_space_entities().count(), 1);
     assert_eq!(readded.entities_in_block("*Paper_Space").count(), 0);
     assert_eq!(readded.objects, original.objects);

@@ -1,0 +1,7 @@
+700 0 1 0
+8 acadrust 8 ACIS 7.0 24 Thu Jan 01 00:00:00 2023
+10 1e-006 1e-010
+body $-1 -1 $-1 $-1 $-1 $-1 #
+plane-surface $-1 -1 $-1 1 2 3 0 0 1 1 0 0 forward_v I I I I #
+pcurve $-1 -1 $-1 0 forward { exppc nubs 2 closed 2 0 2 1 2 0 0 1 2 3 -1 1e-007 plane 1 2 3 0 0 1 1 0 0 forward_v I I I I } 2 -3 #
+End-of-ACIS-data

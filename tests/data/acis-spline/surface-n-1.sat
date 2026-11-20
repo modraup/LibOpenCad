@@ -1,0 +1,7 @@
+700 0 1 0
+8 acadrust 8 ACIS 7.0 24 Thu Jan 01 00:00:00 2023
+10 1e-006 1e-010
+body $-1 -1 $-1 $-1 $-1 $-1 #
+spline-surface $-1 -1 $-1 reversed { exactsur full nubs 1 1 closed open none none 2 2 0 1 1 1 0 1 1 1 0 0 0 1 0 0 0 1 0 1 1 1 1e-008 0 0 0 0 0 0 I I I I } I I I I #
+pcurve $-1 -1 $-1 0 forward { exppc nubs 1 open 2 0 1 1 1 0 0 1 1 0 spline reversed { ref 0 } I I I I } 2 -3 #
+End-of-ACIS-data

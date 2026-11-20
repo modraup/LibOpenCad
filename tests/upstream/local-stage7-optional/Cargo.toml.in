@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-stage7-optional-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-stage7-optional-oracle"
+path = "@LIBOPENCAD_STAGE7_OPTIONAL_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

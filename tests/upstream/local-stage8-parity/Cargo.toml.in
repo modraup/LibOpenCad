@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-stage8-parity-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-stage8-parity-oracle"
+path = "@LIBOPENCAD_STAGE8_PARITY_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

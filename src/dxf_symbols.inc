@@ -20,14 +20,7 @@ const char* symbol_subclass(SymbolTable table) {
         case SymbolTable::BlockRecord:return "AcDbBlockTableRecord";
     } throw std::invalid_argument("Unknown symbol table");
 }
-void valid_symbol_name(std::string_view name) {
-    if(name.empty() || name.find_first_of("<>/\\\":;?*|,=`")!=name.npos ||
-       std::any_of(name.begin(),name.end(),[](unsigned char c){return c<32;}))
-        throw std::invalid_argument("Invalid symbol name");
-    const auto key=detail::symbol_name_key(name); // Also validate UTF-8.
-    if(std::any_of(key.begin(),key.end(),[](char32_t c){return c<32 || (c>=127 && c<=159);}))
-        throw std::invalid_argument("Control character in symbol name");
-}
+using detail::valid_symbol_name;
 bool protected_symbol(SymbolTable table,std::string_view name) {
     const auto key=detail::symbol_name_key(name);
     auto matches=[&](std::string_view other){return key==detail::symbol_name_key(other);};
@@ -103,7 +96,15 @@ void DxfDocument::apply_symbol_properties(DxfRecord& record,SymbolTable table,
 }
 std::uint64_t DxfDocument::add_symbol(SymbolTable table,std::string name,
     const std::vector<SymbolProperty>& properties) {
-    valid_symbol_name(name);
+    return add_symbol_impl(table,std::move(name),properties,false);
+}
+std::uint64_t DxfDocument::add_symbol_impl(SymbolTable table,std::string name,
+    const std::vector<SymbolProperty>& properties,bool anonymous_table_block) {
+    if (anonymous_table_block) {
+        if(table!=SymbolTable::BlockRecord || name.size()<3 || name.substr(0,2)!="*T" ||
+           !std::all_of(name.begin()+2,name.end(),[](char c){return c>='0'&&c<='9';}))
+            throw std::invalid_argument("Invalid anonymous table block name");
+    } else valid_symbol_name(name);
     if(get_symbol(table,name)) throw std::invalid_argument("Symbol name already exists");
     DxfDocument staged=*this;
     if(table==SymbolTable::Layer || table==SymbolTable::LineType) {
@@ -148,13 +149,13 @@ std::uint64_t DxfDocument::add_symbol(SymbolTable table,std::string name,
     if(table==SymbolTable::BlockRecord) {DxfBlockRecord block;static_cast<DxfRecord&>(block)=entry;record=std::move(block);}
     const auto handle=staged.insert_table_entry(symbol_type(table),std::move(record));
     if(table==SymbolTable::BlockRecord) {
-        auto start=staged.make_entity("BLOCK","AcDbBlockBegin",{});
+        DxfBlock start;static_cast<DxfEntity&>(start)=staged.make_entity("BLOCK","AcDbBlockBegin",{});
         auto end=staged.make_entity("ENDBLK","AcDbBlockEnd",{});
         start.set_field("",5,hex_handle(staged.allocate_handle()));end.set_field("",5,hex_handle(staged.allocate_handle()));
         start.set_field("",330,hex_handle(handle));end.set_field("",330,hex_handle(handle));
         const auto blockname=entry.text_field(symbol_subclass(table),2);
         start.set_text_field("AcDbBlockBegin",2,blockname);start.set_text_field("AcDbBlockBegin",3,blockname);
-        start.set_short_field("AcDbBlockBegin",70,0);start.set_point("AcDbBlockBegin",10,{0,0,0});
+        start.set_short_field("AcDbBlockBegin",70,anonymous_table_block?1:0);start.set_point("AcDbBlockBegin",10,{0,0,0});
         std::string section;std::optional<std::size_t> position;
         for(std::size_t i=0;i<staged.records_.size();++i) {
             const auto& r=staged.record_at({i,std::nullopt,false});
@@ -162,7 +163,7 @@ std::uint64_t DxfDocument::add_symbol(SymbolTable table,std::string name,
             if(r.type()=="ENDSEC" && section=="BLOCKS") {if(position) throw std::invalid_argument("Multiple BLOCKS sections");position=i;section.clear();}
         }
         if(!position) throw std::invalid_argument("Missing BLOCKS section");
-        std::vector<Record> definitions{static_cast<DxfRecord>(start),static_cast<DxfRecord>(end)};
+        std::vector<Record> definitions{start,static_cast<DxfRecord>(end)};
         staged.records_.insert(staged.records_.begin()+*position,definitions.begin(),definitions.end());
         staged.rebuild_indexes();
     }
@@ -188,7 +189,7 @@ std::vector<std::size_t> DxfDocument::symbol_references(const DxfRecord& record,
             if(section!="ENTITIES" && section!="BLOCKS")continue;
             if(&r==&record)return true;
             if(const auto* children=sequence(records_[i])) {
-                for(const auto& v:children->vertices_)if(&v==&record)return true;
+                for(const auto& v:children->children_)if(&v==&record)return true;
                 if(children->seqend_ && &*children->seqend_==&record)return true;
             }
         }
@@ -219,7 +220,8 @@ std::vector<std::size_t> DxfDocument::symbol_references(const DxfRecord& record,
             if(layer_state && state_header && !state_layer_seen && p.code==302){result.push_back(i);state_layer_seen=true;}
             continue;
         }
-        if(p.code==101) opaque=true;
+        if(!depth && p.code==1001)opaque=false;
+        if(!depth && p.code==101) opaque=true;
         if(p.code==102) {if(!p.value.empty() && p.value.front()=='{')++depth;else if(p.value=="}" && depth)--depth;continue;}
         if(depth || opaque)continue;
         if(p.code==1001)xdata=true;
@@ -227,13 +229,13 @@ std::vector<std::size_t> DxfDocument::symbol_references(const DxfRecord& record,
         switch(table) {
             case SymbolTable::Layer: ref=(xdata && p.code==1003)||(!xdata && p.code==8 && ((graphical && common(8).found && common(8).index==i) || (head && header=="$CLAYER")));break;
             case SymbolTable::LineType: ref=!xdata && p.code==6 && ((graphical && common(6).found && common(6).index==i) || type=="LAYER" || type=="MLINESTYLE" || (head && header=="$CELTYPE"));break;
-            case SymbolTable::TextStyle: ref=!xdata && p.code==7 && (type=="TEXT" || type=="MTEXT" || type=="ATTRIB" || type=="ATTDEF" || type=="SHAPE" || type=="TABLESTYLE" || (head && header=="$TEXTSTYLE"));break;
-            case SymbolTable::DimStyle: ref=(!xdata && p.code==3 && type=="DIMENSION") || (head && header=="$DIMSTYLE" && p.code==2);break;
+            case SymbolTable::TextStyle: ref=!xdata && p.code==7 && (type=="TEXT" || type=="MTEXT" || type=="ATTRIB" || type=="ATTDEF" || type=="SHAPE" || type=="TABLESTYLE" || type=="ACAD_TABLE" || (head && header=="$TEXTSTYLE"));break;
+            case SymbolTable::DimStyle: ref=(!xdata && p.code==3 && (type=="DIMENSION" || type=="ARC_DIMENSION" || type=="LARGE_RADIAL_DIMENSION" || type=="LEADER" || type=="TOLERANCE")) || (head && header=="$DIMSTYLE" && p.code==2);break;
             case SymbolTable::AppId: ref=p.code==1001;break;
             case SymbolTable::Ucs: ref=head && p.code==2 && (header=="$UCSNAME" || header=="$PUCSNAME");break;
             case SymbolTable::View:ref=!xdata && p.code==6 && (type=="LAYOUT" || type=="PLOTSETTINGS");break;
-            case SymbolTable::BlockRecord:ref=!xdata && ((p.code==2 && (type=="INSERT" || type=="DIMENSION" || type=="BLOCK")) ||
-                (p.code==3 && type=="BLOCK") || (type=="DIMSTYLE" && p.code>=5 && p.code<=7) ||
+            case SymbolTable::BlockRecord:ref=!xdata && ((p.code==2 && (type=="INSERT" || type=="DIMENSION" || type=="ARC_DIMENSION" || type=="LARGE_RADIAL_DIMENSION" || type=="BLOCK")) ||
+                (type=="ACAD_TABLE" && p.code==2 && record.locate("AcDbBlockReference",2).found && record.locate("AcDbBlockReference",2).index==i) || (p.code==3 && type=="BLOCK") || (type=="DIMSTYLE" && p.code>=5 && p.code<=7) ||
                 (head && p.code==1 && (header=="$DIMBLK" || header=="$DIMBLK1" || header=="$DIMBLK2" || header=="$DIMLDRBLK")));break;
             default:break;
         }
@@ -257,7 +259,7 @@ std::uint64_t DxfDocument::rename_symbol(SymbolTable table,std::string_view old_
     }};
     for(auto& item:staged.records_) {
         std::visit(rewrite,item);
-        if(auto* children=sequence(item)) {for(auto& v:children->vertices_) rewrite(v);if(children->seqend_) rewrite(*children->seqend_);}
+        if(auto* children=sequence(item)) {for(auto& v:children->children_) rewrite(v);if(children->seqend_) rewrite(*children->seqend_);}
     }
     std::visit([&](DxfRecord& record){record.set_text_field(symbol_subclass(table),2,new_name);},staged.records_[locations[0]]);
     staged.rebuild_indexes();*this=std::move(staged);return id;
@@ -311,7 +313,7 @@ bool DxfDocument::remove_symbol(SymbolTable table,std::string_view name) {
     for(std::size_t i=0;i<records_.size();++i) {
         if(removed.count(i)) continue;
         check_record(record_at({i,std::nullopt,false}));
-        if(const auto* children=sequence(records_[i])) {for(const auto& v:children->vertices_)check_record(v);if(children->seqend_)check_record(*children->seqend_);}
+        if(const auto* children=sequence(records_[i])) {for(const auto& v:children->children_)check_record(v);if(children->seqend_)check_record(*children->seqend_);}
     }
     // An extension dictionary owned by the entry also blocks removal until explicitly detached.
     if(std::any_of(source.pairs_.begin(),source.pairs_.end(),[](const auto& p){return p.code==102 && p.value=="{ACAD_XDICTIONARY";}))

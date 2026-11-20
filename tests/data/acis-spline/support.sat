@@ -1,0 +1,5 @@
+700 0 0 0
+8 acadrust 8 ACIS 7.0 0 
+1 1e-006 1e-010
+intcurve-curve $-1 -1 $-1 forward { off_surf_int_cur nullbs spline forward { exactsur full nubs 1 1 open open none none 2 2 0 1 1 1 0 1 1 1 0 0 0 1 0 0 0 1 1 1 1 2 0 } I I I I null_surface nubs 1 open 2 0 1 1 1 0 0 1 1 2 0 0 } I I #
+End-of-ACIS-data

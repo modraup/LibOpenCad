@@ -165,4 +165,82 @@ Transform Transform::from_mirror_line(Vector3 p1, Vector3 p2) {
     }
     return from_mirror_plane({p1.x, p1.y, 0}, {-dy, dx, 0});
 }
+
+MirrorPlane MirrorPlane::point_normal(Vector3 point, Vector3 normal) {
+    MirrorPlane plane;
+    plane.kind_ = Kind::PointNormal;
+    plane.a_ = point;
+    plane.b_ = normal;
+    return plane;
+}
+MirrorPlane MirrorPlane::three_point(Vector3 first, Vector3 second, Vector3 third) {
+    MirrorPlane plane;
+    plane.kind_ = Kind::ThreePoint;
+    plane.a_ = first;
+    plane.b_ = second;
+    plane.c_ = third;
+    return plane;
+}
+MirrorPlane MirrorPlane::xy(Vector3 point) {
+    MirrorPlane plane;
+    plane.kind_ = Kind::XY;
+    plane.a_ = point;
+    return plane;
+}
+MirrorPlane MirrorPlane::yz(Vector3 point) {
+    MirrorPlane plane;
+    plane.kind_ = Kind::YZ;
+    plane.a_ = point;
+    return plane;
+}
+MirrorPlane MirrorPlane::zx(Vector3 point) {
+    MirrorPlane plane;
+    plane.kind_ = Kind::ZX;
+    plane.a_ = point;
+    return plane;
+}
+Transform MirrorPlane::transform() const {
+    auto direction = [](Vector3 first, Vector3 end) -> std::optional<Vector3> {
+        if (!finite(first) || !finite(end))
+            return std::nullopt;
+        auto delta = end - first;
+        if (!finite(delta)) {
+            const double scale =
+                std::max({std::abs(first.x), std::abs(first.y), std::abs(first.z), std::abs(end.x),
+                          std::abs(end.y), std::abs(end.z)});
+            if (scale == 0)
+                return std::nullopt;
+            delta = Vector3{end.x / scale - first.x / scale, end.y / scale - first.y / scale,
+                            end.z / scale - first.z / scale};
+        }
+        const double scale = max_abs(delta);
+        if (scale <= 0)
+            return std::nullopt;
+        return Vector3{delta.x / scale, delta.y / scale, delta.z / scale};
+    };
+    Vector3 point = a_, normal = Vector3::UNIT_Z;
+    switch (kind_) {
+    case Kind::PointNormal:
+        normal = b_;
+        break;
+    case Kind::ThreePoint: {
+        auto a = direction(a_, b_), b = direction(a_, c_);
+        if (!a || !b)
+            return Transform::identity();
+        point = a_;
+        normal = a->cross(*b);
+        break;
+    }
+    case Kind::XY:
+        normal = Vector3::UNIT_Z;
+        break;
+    case Kind::YZ:
+        normal = Vector3::UNIT_X;
+        break;
+    case Kind::ZX:
+        normal = Vector3::UNIT_Y;
+        break;
+    }
+    return Transform::from_mirror_plane(point, normal);
+}
 } // namespace libopencad

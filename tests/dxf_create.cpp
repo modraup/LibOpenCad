@@ -63,11 +63,11 @@ void structure(const DxfDocument& doc) {
     check(tables.size() == expected.size(), "all default tables");
     check(sections == std::set<std::string>({"HEADER","CLASSES","TABLES","BLOCKS","ENTITIES","OBJECTS"}),
         "all default sections");
-    check(identities.size() == 43, "all identities must exist before Rust can repair anything");
+    check(identities.size() == 44, "all identities must exist before Rust can repair anything");
 }
 void verify(const DxfDocument& doc) {
     check(doc.version() == DxfVersion::AC1032, "default version");
-    check(doc.next_handle() == 0x31, "initial allocator");
+    check(doc.next_handle() == 0x32, "initial allocator");
     check(doc.duplicate_handles().empty(), "default duplicate handles");
     check(doc.model_space_entity_handles().empty() && doc.paper_space_entity_handles().empty(), "empty spaces");
     check(doc.get_layer("0")->handle() == "10", "layer 0");
@@ -78,7 +78,7 @@ void verify(const DxfDocument& doc) {
     check(doc.block_record("18")->is_paper_space(), "paper block");
     for (auto handle : {"10","11","12","13","14","15","16","17","18","19","1A","1B",
                         "1C","1D","1E","1F","20","21","22","23","24","25","26","27","28",
-                        "29","2A","2B","2C","2D","2E","2F","30"}) {
+                        "29","2A","2B","2C","2D","2E","2F","30","31"}) {
         check(doc.get_record(handle), "default record");
         check(doc.ownership_chain(handle).status == OwnershipStatus::Root, "default owner chain");
     }
@@ -101,14 +101,14 @@ int main(int argc, char** argv) {
         check(reopened.insertion_units() == units && reopened.is_binary() == binary, "reopen");
         const std::string prefix = argv[2];
         write_file(prefix + ".dxf", save(doc));
-        check(doc.add_linetype({"新增虚线", "from new document", {{0.5,{}},{-0.25,{}}}, 0.75}) == 0x31, "new linetype");
-        check(doc.add_layer("新增图层", 3, "新增虚线") == 0x32, "new layer");
+        check(doc.add_linetype({"新增虚线", "from new document", {{0.5,{}},{-0.25,{}}}, 0.75}) == 0x32, "new linetype");
+        check(doc.add_layer("新增图层", 3, "新增虚线") == 0x33, "new layer");
         check(doc.get_layer("新增图层")->owner_handle() == "2", "new layer owner");
         check(doc.get_linetype("新增虚线")->owner_handle() == "5", "new linetype owner");
         write_file(prefix + "-added.dxf", save(doc));
         auto independent = DxfDocument::create();
         verify(independent);
         check(!independent.get_layer("新增图层") && independent.insertion_units() == 0, "independent defaults");
-        check(independent.allocate_handle() == 0x31, "fresh allocator");
+        check(independent.allocate_handle() == 0x32, "fresh allocator");
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
 }

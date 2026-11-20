@@ -1,0 +1,5 @@
+700 0 0 0
+8 acadrust 8 ACIS 7.0 0 
+1 1e-006 1e-010
+spline-surface $-1 -1 $-1 forward { sum_spl_sur 20900 intcurve F { int_int_cur 21500 0 nubs 1 0 2 0 1 1 1 10 0 0 10 0 5 } I I straight 1 2 3 0 0 1 I I -1 1 2 2 F -1 F 0 F 0 F 5 } I I I I #
+End-of-ACIS-data

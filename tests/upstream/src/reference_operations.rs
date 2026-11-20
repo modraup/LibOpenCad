@@ -15,7 +15,7 @@ pub fn verify(prefix:&str)->acadrust::Result<()> {
         let owners=DxfReader::from_file(format!("{prefix}-owners-{format}.dxf"))?.read()?;
         assert_eq!(owners.entities_in_block("*Model_Space").count(),2);
         assert_eq!(owners.entities_in_block("*Paper_Space").count(),1);
-        assert_eq!(owners.get_entity(Handle::new(0x31)).unwrap().common().owner_handle,Handle::new(0x18));
+        assert_eq!(owners.get_entity(Handle::new(0x32)).unwrap().common().owner_handle,Handle::new(0x18));
         let path=owners.entities().find_map(|e|match e{EntityType::Polyline3D(p)=>Some(p),_=>None}).unwrap();
         assert_eq!(path.vertices[1].position,acadrust::Vector3::new(1.,2.,3.));
         let blocks=DxfReader::from_file(format!("{prefix}-block-owners-{format}.dxf"))?.read()?;
@@ -24,7 +24,7 @@ pub fn verify(prefix:&str)->acadrust::Result<()> {
         assert_eq!(from_block,&EntityType::Polyline3D(path.clone()));
         let before=DxfReader::from_file(format!("{prefix}-before-{format}.dxf"))?.read()?;
         let after=DxfReader::from_file(format!("{prefix}-after-{format}.dxf"))?.read()?;
-        let original=Handle::new(0x31);let line=Handle::new(0x32);
+        let original=Handle::new(0x32);let line=Handle::new(0x33);
         assert!(before.xrecord(original,"中文数据").is_some());
         let source=before.get_entity(original).unwrap();let copy=after.entities().find(|e|matches!(e,EntityType::Arc(_))).unwrap();
         let (EntityType::Arc(src),EntityType::Arc(dst))=(source,copy)else{panic!()};

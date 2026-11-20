@@ -25,7 +25,9 @@ int main(int argc,char** argv) {try {
         d.for_each<DxfLine>([](const auto& e){check(e.layer()=="NewLayer" && e.linetype()=="NewType","flat entity names not updated");});
         check(d.repair_symbol_references(SymbolTable::Layer,"OldLayer","NewLayer")==0,"repair changed opaque layer string");
         check(d.repair_symbol_references(SymbolTable::LineType,"OldType","NewType")==0,"repair changed opaque linetype string");
-        check(d.reference_issues().empty(),"opaque object strings reported as references");
+        const auto issues=d.reference_issues();
+        check(issues.size()==1 && issues[0].source_handle=="800" && issues[0].status==ReferenceStatus::MissingOwner && !issues[0].table,
+              "opaque strings ignored; null OBJECTS owner diagnosed");
     } else if(scenario=="extension") {
         const auto line=hex(d.add_line({1,2,3},{4,5,6}));auto data=records(save(d),binary);
         auto& entity=at(data,line);

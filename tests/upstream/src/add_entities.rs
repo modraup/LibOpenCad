@@ -10,7 +10,7 @@ pub fn verify(format: &str, path: &str) -> acadrust::Result<()> {
     reference.header.insertion_units = 4;
     let mut layer = Layer::with_color("标注", Color::Index(2));
     layer.handle = reference.allocate_handle();
-    assert_eq!(layer.handle.value(), 0x31);
+    assert_eq!(layer.handle.value(), 0x32);
     reference.layers.add(layer)?;
     let mut lt = LineType::new("建筑虚线");
     lt.handle = reference.allocate_handle();
@@ -36,7 +36,7 @@ pub fn verify(format: &str, path: &str) -> acadrust::Result<()> {
             .into_iter().enumerate() {
             let handle = if n == 0 { reference.add_entity(entity)? }
                 else { reference.add_paper_space_entity(entity)? };
-            assert_eq!(handle.value(), 0x33 + n*3 + i as u64);
+            assert_eq!(handle.value(), 0x34 + n*3 + i as u64);
         }
     }
     let binary = format == "binary";
@@ -54,15 +54,15 @@ pub fn verify(format: &str, path: &str) -> acadrust::Result<()> {
     assert_eq!(actual.objects, expected.objects);
     assert_eq!(actual.block_records, expected.block_records);
     assert_eq!(actual.header.insertion_units, 4);
-    assert_eq!(actual.header.handle_seed, 0x39);
-    for handle in 0x33..=0x38 {
+    assert_eq!(actual.header.handle_seed, 0x3A);
+    for handle in 0x34..=0x39 {
         let h = Handle::new(handle);
         let entity = actual.get_entity(h).expect("missing C++ identity");
         assert_eq!(entity, expected.get_entity(h).unwrap(), "entity {handle:X}: geometry/text/common data");
-        assert_eq!(entity.common().owner_handle.value(), if handle < 0x36 { 0x15 } else { 0x18 });
-        if handle >= 0x36 { assert_eq!(entity.common().entity_mode, Some(1)); }
+        assert_eq!(entity.common().owner_handle.value(), if handle < 0x37 { 0x15 } else { 0x18 });
+        if handle >= 0x37 { assert_eq!(entity.common().entity_mode, Some(1)); }
     }
-    for (space, handles) in [("*Model_Space", vec![0x33,0x34,0x35]), ("*Paper_Space", vec![0x36,0x37,0x38])] {
+    for (space, handles) in [("*Model_Space", vec![0x34,0x35,0x36]), ("*Paper_Space", vec![0x37,0x38,0x39])] {
         assert_eq!(actual.entities_in_block(space).map(|e| e.common().handle.value()).collect::<Vec<_>>(), handles);
     }
     assert_eq!(actual.audit(), expected.audit());

@@ -74,8 +74,8 @@ void survivors(const DxfDocument& before, const DxfDocument& after, const std::v
 }
 void verify(const DxfDocument& doc, const std::vector<std::string>& model, const std::vector<std::string>& paper) {
     check(doc.model_space_entity_handles() == model && doc.paper_space_entity_handles() == paper, "space membership/order");
-    check(doc.next_handle() == 0x39 && doc.duplicate_handles().empty(), "allocator and identities");
-    for (std::uint64_t h = 0x33; h <= 0x38; ++h) {
+    check(doc.next_handle() == 0x3A && doc.duplicate_handles().empty(), "allocator and identities");
+    for (std::uint64_t h = 0x34; h <= 0x39; ++h) {
         const auto key = hex(h);
         const bool exists = std::find(model.begin(), model.end(), key) != model.end() ||
             std::find(paper.begin(), paper.end(), key) != paper.end();
@@ -90,29 +90,29 @@ void verify(const DxfDocument& doc, const std::vector<std::string>& model, const
 void fixture(const char* path, const std::string& prefix) {
     std::ifstream in(path, std::ios::binary);
     const auto original = DxfDocument::read(in);
-    verify(original, {"33","34","35"}, {"36","37","38"});
+    verify(original, {"34","35","36"}, {"37","38","39"});
     auto first = original;
-    check(first.remove_entity(" 00033 ") && first.remove_entity(std::uint64_t(0x37)) && first.remove_entity("35"), "delete first subset");
-    verify(first, {"34"}, {"36","38"});
-    no_op(first, "33");
-    survivors(original, first, {"33","37","35"});
-    verify(read(save(first)), {"34"}, {"36","38"});
+    check(first.remove_entity(" 00034 ") && first.remove_entity(std::uint64_t(0x38)) && first.remove_entity("36"), "delete first subset");
+    verify(first, {"35"}, {"37","39"});
+    no_op(first, "34");
+    survivors(original, first, {"34","38","36"});
+    verify(read(save(first)), {"35"}, {"37","39"});
     write(first, prefix + "-first.dxf");
     // Complementary subset exercises each type in both spaces and shifted indices.
     auto second = original;
-    for (auto h : {"38","34","36"}) check(second.remove_entity(h), "delete second subset");
-    verify(second, {"33","35"}, {"37"});
-    survivors(original, second, {"38","34","36"});
+    for (auto h : {"39","35","37"}) check(second.remove_entity(h), "delete second subset");
+    verify(second, {"34","36"}, {"38"});
+    survivors(original, second, {"39","35","37"});
     write(second, prefix + "-second.dxf");
-    for (auto h : {"36","34","38"}) check(first.remove_entity(h), "delete remaining entities");
+    for (auto h : {"37","35","39"}) check(first.remove_entity(h), "delete remaining entities");
     verify(first, {}, {});
-    survivors(original, first, {"33","34","35","36","37","38"});
+    survivors(original, first, {"34","35","36","37","38","39"});
     write(first, prefix + "-empty.dxf");
     auto reopened = read(save(first));
     verify(reopened, {}, {});
-    check(reopened.add_line({9,8,7}, {6,5,4}) == 0x39, "never reuse deleted handle");
+    check(reopened.add_line({9,8,7}, {6,5,4}) == 0x3A, "never reuse deleted handle");
     write(reopened, prefix + "-readded.dxf");
-    verify(original, {"33","34","35"}, {"36","37","38"});
+    verify(original, {"34","35","36"}, {"37","38","39"});
 }
 void boundaries() {
     for (bool binary : {false, true}) {
@@ -135,7 +135,7 @@ void boundaries() {
     // Cross-section duplicates are equally ambiguous, even though get_record is last-wins.
     auto cross = read(head + "0\nENDSEC\n0\nSECTION\n2\nOBJECTS\n0\nXRECORD\n5\nAB\n" + tail);
     rejects(cross, [&] { cross.remove_entity("AB"); });
-    for (auto type : {"SPLINE", "CUSTOM"}) {
+    for (auto type : {"CUSTOM_SPLINE", "CUSTOM"}) {
         auto other = read("0\nSECTION\n2\nENTITIES\n0\n" + std::string(type) + "\n5\nAB\n" + tail);
         rejects(other, [&] { other.remove_entity("AB"); });
     }

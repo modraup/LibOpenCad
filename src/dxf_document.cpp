@@ -1,26 +1,42 @@
 // SPDX-License-Identifier: MPL-2.0
 // Adapted from acadrust src/io/dxf/{reader,writer} text and section modules.
 #include <libopencad/dxf_document.hpp>
+#include <libopencad/transform.hpp>
 #include "dxf_code_page.hpp"
 #include "dxf_binary.hpp"
+#include "surface_profiles.hpp"
 
+#include <libopencad/fields.hpp>
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstddef>
+#include <deque>
+#include <iomanip>
 #include <istream>
 #include <iterator>
 #include <limits>
 #include <locale>
+#include <map>
+#include <optional>
 #include <ostream>
 #include <sstream>
+#include <set>
 #include <stdexcept>
+#include <functional>
+#include <tuple>
+#include <string>
 #include <utility>
 #include <unordered_set>
 #include <type_traits>
+#include <variant>
+#include <vector>
 
 namespace libopencad {
 namespace {
 #include "dxf_defaults.inc"
+bool known_object_context(std::string_view name);
 
 std::string_view trim(std::string_view s) {
     const auto first = s.find_first_not_of(" \t\r");
@@ -170,6 +186,9 @@ std::string DxfRecord::type() const {
 }
 
 std::string DxfRecord::handle() const {
+    // SECTION contains header variables, not a database-object identity.
+    // In particular group 5 under $HANDSEED must never identify the HEADER.
+    if (type() == "SECTION") return {};
     const int code = !pairs_.empty() && trim(pairs_.front().value) == "DIMSTYLE" ? 105 : 5;
     return std::string(trim(field("", code)));
 }
@@ -180,6 +199,8 @@ int DxfRecord::short_field(std::string_view subclass, int code, int fallback) co
     const auto pos = locate(subclass, code);
     if (!pos.found) return fallback;
     const auto& bytes = pairs_[pos.index].value;
+    if (code >= 290 && code <= 299)
+        return detail::as_i16(code, bytes, binary_).value_or(static_cast<std::int16_t>(fallback));
     return binary_ ? detail::binary_short(bytes) : integer(bytes);
 }
 
@@ -238,6 +259,7 @@ void DxfRecord::set_point(std::string_view sub, int code, Point3 p) {
 
 constexpr auto layer_record = "AcDbLayerTableRecord";
 std::string DxfLayer::name() const { return text_field(layer_record, 2); }
+std::string DxfLayer::linetype() const { return text_field(layer_record, 6, "Continuous"); }
 int DxfLayer::signed_color_index() const { return short_field(layer_record, 62, 7); }
 void DxfLayer::set_signed_color_index(int index) {
     if (!index || index < -255 || index > 255) throw std::invalid_argument("Invalid layer ACI");
@@ -271,6 +293,28 @@ void DxfEntity::set_color(Color value) {
             replacement.push_back({420, binary_ ? detail::binary_int32_bits(*rgb) : std::to_string(*rgb)});
     }
     replace_common_fields({62, 420}, std::move(replacement));
+    uses_dwg_color_book_ = false;
+}
+
+Transparency DxfEntity::transparency() const {
+    const auto pos = locate("AcDbEntity", 440);
+    const auto packed = pos.found ? detail::as_i32_bits(pairs_[pos.index].value, binary_) : std::nullopt;
+    return Transparency::from_alpha_value(packed.value_or(0));
+}
+
+void DxfEntity::set_transparency(Transparency value) {
+    std::vector<Pair> replacement;
+    if (value != Transparency::by_layer()) {
+        const auto packed = value.to_alpha_value();
+        replacement.push_back({440, binary_ ? detail::binary_int32_bits(packed) : std::to_string(packed)});
+    }
+    replace_common_fields({440}, std::move(replacement));
+}
+
+double DxfEntity::linetype_scale() const { return number("AcDbEntity", 48, 1.0); }
+
+void DxfEntity::set_linetype_scale(double value) {
+    replace_common_fields({48}, {{48, encode_number(value)}});
 }
 
 std::string DxfEntity::linetype() const {
@@ -344,6 +388,36 @@ Point3 DxfLine::start() const { return point("AcDbLine", 10); }
 Point3 DxfLine::end() const { return point("AcDbLine", 11); }
 void DxfLine::set_start(Point3 p) { set_point("AcDbLine", 10, p); }
 void DxfLine::set_end(Point3 p) { set_point("AcDbLine", 11, p); }
+
+// PointReader accepts X/Y with optional Z. Missing coordinates retain Rust defaults.
+Point3 DxfPoint::location() const { return point_or("AcDbPoint", 10, {}); }
+double DxfPoint::thickness() const { return number("AcDbPoint", 39, 0); }
+Point3 DxfPoint::normal() const { return point_or("AcDbPoint", 210, {0, 0, 1}); }
+double DxfPoint::x_axis_angle() const { return number("AcDbPoint", 50, 0); }
+void DxfPoint::set_location(Point3 value) { set_point("AcDbPoint", 10, value); }
+void DxfPoint::set_thickness(double value) { set_number("AcDbPoint", 39, value); }
+void DxfPoint::set_normal(Point3 value) { set_point("AcDbPoint", 210, value); }
+void DxfPoint::set_x_axis_angle(double value) { set_number("AcDbPoint", 50, value); }
+
+Point3 DxfRay::base_point() const { return point_or("AcDbRay", 10, {}); }
+Vector3 DxfRay::direction() const { return point_or("AcDbRay", 11, {1, 0, 0}).normalize(); }
+void DxfRay::set_base_point(Point3 value) { set_point("AcDbRay", 10, value); }
+void DxfRay::set_direction(Vector3 value) {
+    finite(value.x); finite(value.y); finite(value.z);
+    set_point("AcDbRay", 11, value.normalize());
+}
+Point3 DxfXLine::base_point() const { return point_or("AcDbXline", 10, {}); }
+Vector3 DxfXLine::direction() const { return point_or("AcDbXline", 11, {1, 0, 0}).normalize(); }
+void DxfXLine::set_base_point(Point3 value) { set_point("AcDbXline", 10, value); }
+void DxfXLine::set_direction(Vector3 value) {
+    finite(value.x); finite(value.y); finite(value.z);
+    set_point("AcDbXline", 11, value.normalize());
+}
+
+#include "dxf_faces.inc"
+#include "dxf_spline.inc"
+#include "dxf_mtext.inc"
+
 Point3 DxfCircle::center() const { return point("AcDbCircle", 10); }
 double DxfCircle::radius() const { return number("AcDbCircle", 40, 1); }
 void DxfCircle::set_center(Point3 p) { set_point("AcDbCircle", 10, p); }
@@ -391,9 +465,9 @@ constexpr auto face_record = "AcDbFaceRecord";
 
 template<class Record>
 auto sequence(Record& record) {
-    using Sequence = std::conditional_t<std::is_const_v<Record>, const DxfVertexSequence, DxfVertexSequence>;
+    using Sequence = std::conditional_t<std::is_const_v<Record>, const DxfCompoundEntity, DxfCompoundEntity>;
     return std::visit([](auto& item) -> Sequence* {
-        if constexpr (std::is_base_of_v<DxfVertexSequence, std::decay_t<decltype(item)>>)
+        if constexpr (std::is_base_of_v<DxfCompoundEntity, std::decay_t<decltype(item)>>)
             return &item;
         return nullptr;
     }, record);
@@ -403,13 +477,13 @@ auto sequence(Record& record) {
 bool DxfPolyline3D::is_closed() const { return (short_field(polyline3d, 70, 0) & 1) != 0; }
 
 PolylineVertex3D DxfVertexSequence::spatial_vertex(std::size_t index, std::string_view subclass) const {
-    const auto& v = vertices_.at(index);
+    const auto& v = children_.at(index);
     return {v.point(subclass, 10), v.short_field(subclass, 70, 0),
-            v.text_field("AcDbEntity", 8, "0"), v.handle(), v.owner_handle()};
+            v.text_field("AcDbEntity", 8, "0"), v.handle(), v.owner_handle(),v.number(subclass,42,0),v.number(subclass,40,0),v.number(subclass,41,0),v.number(subclass,50,0)*radians_per_degree,static_cast<std::int32_t>(detail::as_i32_bits(v.field(subclass,91,v.binary_?detail::binary_int32_bits(0):"0"),v.binary_).value_or(0))};
 }
 
 void DxfVertexSequence::set_spatial_vertex(std::size_t index, std::string_view subclass, Point3 position) {
-    vertices_.at(index).set_point(subclass, 10, position);
+    children_.at(index).set_point(subclass, 10, position);
 }
 
 PolylineVertex3D DxfPolyline3D::vertex(std::size_t index) const {
@@ -450,8 +524,8 @@ bool PolyfaceFace::is_triangle() const noexcept {
 }
 
 void DxfPolyfaceMesh::index_children() {
-    for (std::size_t i = 0; i < vertices_.size(); ++i) {
-        const auto& child = vertices_[i];
+    for (std::size_t i = 0; i < children_.size(); ++i) {
+        const auto& child = children_[i];
         if (child.short_field(polyface_vertex, 70, 0) & 64)
             coordinate_records_.push_back(i);
         else if (child.short_field(face_record, 70, 0) & 128)
@@ -464,14 +538,15 @@ PolylineVertex3D DxfPolyfaceMesh::vertex(std::size_t index) const {
 }
 
 PolyfaceFace DxfPolyfaceMesh::face(std::size_t index) const {
-    const auto& child = vertices_[face_records_.at(index)];
+    const auto& child = children_[face_records_.at(index)];
+    DxfEntity display;static_cast<DxfRecord&>(display)=child;std::optional<Color> color;if(child.locate("AcDbEntity",62).found||child.locate("AcDbEntity",420).found)color=display.color();
     return {{child.short_field(face_record, 71, 0), child.short_field(face_record, 72, 0),
              child.short_field(face_record, 73, 0), child.short_field(face_record, 74, 0)},
-            child.text_field("AcDbEntity", 8, "0"), child.handle(), child.owner_handle()};
+            child.text_field("AcDbEntity", 8, "0"), child.handle(), child.owner_handle(),color,static_cast<std::int16_t>(child.short_field(face_record,70,128))};
 }
 
 void DxfPolyfaceMesh::set_face_indices(std::size_t index, std::array<int, 4> indices) {
-    auto& record = vertices_[face_records_.at(index)];
+    auto& record = children_[face_records_.at(index)];
     for (std::size_t i = 0; i < indices.size(); ++i) {
         const int ref = indices[i];
         if ((ref == 0 && i < 3) || ref < -32767 || ref > 32767 ||
@@ -497,14 +572,14 @@ double DxfPolyline2D::default_start_width() const { return number(heavy_polyline
 double DxfPolyline2D::default_end_width() const { return number(heavy_polyline, 41, 0); }
 
 PolylineVertex2D DxfPolyline2D::vertex(std::size_t index) const {
-    const auto& v = vertices_.at(index);
+    const auto& v = children_.at(index);
     return {v.point(heavy_vertex, 10), v.number(heavy_vertex, 40, default_start_width()),
             v.number(heavy_vertex, 41, default_end_width()), v.number(heavy_vertex, 42, 0),
-            v.handle(), v.owner_handle()};
+            v.handle(), v.owner_handle(),static_cast<std::int16_t>(v.short_field(heavy_vertex,70,0)),v.number(heavy_vertex,50,0)*radians_per_degree,(v.field(heavy_vertex,91).empty()?0:integer(v.binary_?detail::text_value_from_binary(91,v.field(heavy_vertex,91)):v.field(heavy_vertex,91)))};
 }
 
 void DxfPolyline2D::set_vertex_position(std::size_t index, double x, double y) {
-    auto& v = vertices_.at(index);
+    auto& v = children_.at(index);
     finite(x);
     finite(y);
     v.set_number(heavy_vertex, 10, x);
@@ -512,7 +587,7 @@ void DxfPolyline2D::set_vertex_position(std::size_t index, double x, double y) {
 }
 
 void DxfPolyline2D::set_vertex_widths(std::size_t index, double start, double end) {
-    auto& v = vertices_.at(index);
+    auto& v = children_.at(index);
     finite(start);
     finite(end);
     v.set_number(heavy_vertex, 40, start);
@@ -520,7 +595,7 @@ void DxfPolyline2D::set_vertex_widths(std::size_t index, double start, double en
 }
 
 void DxfPolyline2D::set_bulge(std::size_t index, double value) {
-    vertices_.at(index).set_number(heavy_vertex, 42, value);
+    children_.at(index).set_number(heavy_vertex, 42, value);
 }
 
 namespace {
@@ -590,6 +665,7 @@ void DxfLwPolyline::set_closed(bool closed) {
 }
 bool DxfLwPolyline::plinegen() const { return (short_field(polyline_subclass, 70, 0) & 128) != 0; }
 double DxfLwPolyline::elevation() const { return number(polyline_subclass, 38, 0); }
+void DxfLwPolyline::set_elevation(double value) { set_number(polyline_subclass, 38, value); }
 double DxfLwPolyline::thickness() const { return number(polyline_subclass, 39, 0); }
 double DxfLwPolyline::constant_width() const { return number(polyline_subclass, 43, 0); }
 Point3 DxfLwPolyline::normal() const { return point_or(polyline_subclass, 210, {0,0,1}); }
@@ -603,6 +679,29 @@ void DxfText::set_text(std::string s) { set_text_field("AcDbText", 1, std::move(
 
 // acadrust tables/block_record.rs and document.rs::entities_in_block.
 std::string DxfBlockRecord::name() const { return text_field("AcDbBlockTableRecord", 2); }
+std::int16_t DxfBlockRecord::units() const {
+    if (!field("AcDbBlockTableRecord", 70).empty())
+        return static_cast<std::int16_t>(short_field("AcDbBlockTableRecord", 70, 0));
+    auto data = extended_data();
+    for (const auto &rec : data) {
+        if (rec.application_name != "ACAD" || rec.values.empty() || rec.values[0].code != 1000)
+            continue;
+        auto *label = std::get_if<std::string>(&rec.values[0].value);
+        if (!label || *label != "DesignCenter Data")
+            continue;
+        std::vector<std::int16_t> shorts;
+        for (const auto &item : rec.values) {
+            if (item.code != 1070)
+                continue;
+            if (auto *n = std::get_if<std::int16_t>(&item.value))
+                shorts.push_back(*n);
+        }
+        if (shorts.size() >= 2)
+            return shorts[1];
+    }
+    return 0;
+}
+std::int16_t DxfBlockRecord::flags() const { return static_cast<std::int16_t>(short_field("AcDbBlockTableRecord", 70, 0)); }
 bool DxfBlockRecord::is_model_space() const { return ascii_equal(name(), "*Model_Space"); }
 bool DxfBlockRecord::is_paper_space() const {
     constexpr std::string_view prefix = "*Paper_Space";
@@ -612,9 +711,160 @@ bool DxfBlockRecord::is_paper_space() const {
 // Store record locations so copying a document never retains pointers into its source.
 const DxfRecord& DxfDocument::record_at(const RecordLocation& location) const {
     const auto& record = records_[location.record];
-    if (location.vertex) return sequence(record)->vertices_[*location.vertex];
+    if (location.vertex) return sequence(record)->children_[*location.vertex];
     if (location.seqend) return *sequence(record)->seqend_;
     return std::visit([](const DxfRecord& item) -> const DxfRecord& { return item; }, record);
+}
+
+std::vector<std::string> DxfDocument::dimension_header_variables() const {
+    std::set<std::string> names;
+    if (header_index_) {
+        const auto &header = record_at({*header_index_, std::nullopt, false});
+        for (const auto &p : header.pairs_) {
+            if (p.code != 9 || p.value.compare(0, 4, "$DIM") != 0) continue;
+            auto name = p.value;
+            for (auto &ch : name) if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+            names.insert(std::move(name));
+        }
+    }
+    return {names.begin(), names.end()};
+}
+
+std::int16_t DxfDocument::header_int16(std::string_view name, std::int16_t fallback) const {
+    if (!header_index_)
+        return fallback;
+    const auto &header = record_at({*header_index_, std::nullopt, false});
+    std::string variable;
+    std::int16_t found = fallback;
+    for (const auto &p : header.pairs_) {
+        if (p.code == 9)
+            variable = std::string(trim(p.value));
+        else if ((p.code == 70 || p.code == 90) && variable == name) {
+            try {
+                found = static_cast<std::int16_t>(integer(p.value));
+            } catch (...) {
+            }
+        }
+    }
+    return found;
+}
+
+bool DxfDocument::header_bool290(std::string_view name, bool fallback) const {
+    if (!header_index_)
+        return fallback;
+    const auto &header = record_at({*header_index_, std::nullopt, false});
+    std::string variable;
+    bool found = fallback;
+    for (const auto &p : header.pairs_) {
+        if (p.code == 9)
+            variable = std::string(trim(p.value));
+        else if (p.code == 290 && variable == name) {
+            auto t = trim(p.value);
+            found = !(t == "0" || t == "false" || t == "FALSE");
+        }
+    }
+    return found;
+}
+
+Point3 DxfDocument::header_point(std::string_view name, Point3 fallback) const {
+    if (!header_index_)
+        return fallback;
+    const auto &header = record_at({*header_index_, std::nullopt, false});
+    std::string variable;
+    Point3 found = fallback;
+    for (const auto &p : header.pairs_) {
+        if (p.code == 9)
+            variable = std::string(trim(p.value));
+        else if (variable == name) {
+            auto parse = [&](std::string_view text, double current) {
+                text = trim(text);
+                if (text.empty())
+                    return current;
+                try {
+                    return std::stod(std::string(text));
+                } catch (...) {
+                    return current;
+                }
+            };
+            if (p.code == 10)
+                found.x = parse(p.value, found.x);
+            else if (p.code == 20)
+                found.y = parse(p.value, found.y);
+            else if (p.code == 30)
+                found.z = parse(p.value, found.z);
+        }
+    }
+    return found;
+}
+
+void DxfDocument::set_header_point(std::string_view name, Point3 value) {
+    if (!header_index_)
+        return;
+    auto &header = const_cast<DxfRecord &>(record_at({*header_index_, std::nullopt, false}));
+    std::string variable;
+    std::optional<std::size_t> x, y, z;
+    for (std::size_t i = 0; i < header.pairs_.size(); ++i) {
+        const auto &p = header.pairs_[i];
+        if (p.code == 9)
+            variable = std::string(trim(p.value));
+        else if (variable == name) {
+            if (p.code == 10)
+                x = i;
+            else if (p.code == 20)
+                y = i;
+            else if (p.code == 30)
+                z = i;
+        }
+    }
+    auto encoded = [&](double n) { return header.encode_number(n); };
+    if (x)
+        header.pairs_[*x].value = encoded(value.x);
+    if (y)
+        header.pairs_[*y].value = encoded(value.y);
+    if (z)
+        header.pairs_[*z].value = encoded(value.z);
+    if (x && y && z)
+        return;
+    std::size_t insert_at = header.pairs_.size();
+    for (std::size_t i = 1; i < header.pairs_.size(); ++i) {
+        if (header.pairs_[i].code == 0) {
+            insert_at = i;
+            break;
+        }
+    }
+    std::vector<DxfRecord::Pair> added;
+    if (!x || !y || !z)
+        added.push_back({9, std::string(name)});
+    if (!x)
+        added.push_back({10, encoded(value.x)});
+    if (!y)
+        added.push_back({20, encoded(value.y)});
+    if (!z)
+        added.push_back({30, encoded(value.z)});
+    header.pairs_.insert(header.pairs_.begin() + static_cast<std::ptrdiff_t>(insert_at), added.begin(),
+                         added.end());
+}
+
+std::int16_t DxfDocument::linear_unit_format() const { return header_int16("$LUNITS", 2); }
+std::int16_t DxfDocument::linear_unit_precision() const { return header_int16("$LUPREC", 4); }
+std::int16_t DxfDocument::angular_unit_format() const { return header_int16("$AUNITS", 0); }
+std::int16_t DxfDocument::angular_unit_precision() const { return header_int16("$AUPREC", 0); }
+bool DxfDocument::plot_style_mode() const { return header_bool290("$PSTYLEMODE", true); }
+Point3 DxfDocument::model_space_ucs_origin() const { return header_point("$UCSORG", {}); }
+Point3 DxfDocument::model_space_ucs_x_axis() const { return header_point("$UCSXDIR", {1, 0, 0}); }
+Point3 DxfDocument::model_space_ucs_y_axis() const { return header_point("$UCSYDIR", {0, 1, 0}); }
+Point3 DxfDocument::paper_space_ucs_origin() const { return header_point("$PUCSORG", {}); }
+Point3 DxfDocument::paper_space_ucs_x_axis() const { return header_point("$PUCSXDIR", {1, 0, 0}); }
+Point3 DxfDocument::paper_space_ucs_y_axis() const { return header_point("$PUCSYDIR", {0, 1, 0}); }
+void DxfDocument::set_model_space_ucs(Point3 origin, Point3 x_axis, Point3 y_axis) {
+    set_header_point("$UCSORG", origin);
+    set_header_point("$UCSXDIR", x_axis);
+    set_header_point("$UCSYDIR", y_axis);
+}
+void DxfDocument::set_paper_space_ucs(Point3 origin, Point3 x_axis, Point3 y_axis) {
+    set_header_point("$PUCSORG", origin);
+    set_header_point("$PUCSXDIR", x_axis);
+    set_header_point("$PUCSYDIR", y_axis);
 }
 
 const DxfRecord* DxfDocument::get_record(std::string_view handle) const {
@@ -820,6 +1070,7 @@ void DxfDocument::rebuild_indexes() {
         handle_index_[handle].push_back(location);
         const auto limit = std::numeric_limits<std::uint64_t>::max();
         next_handle_ = std::max(next_handle_, handle == limit ? limit : handle + 1);
+        if(item.type()=="SORTENTSTABLE")item.locate_if("AcDbSortentsTable",[&](std::size_t i,int code){if(code==5){auto value=handle_value(item.pairs_[i].value);next_handle_=std::max(next_handle_,value==limit?limit:value+1);}return false;});
     };
     for (std::size_t i = 0; i < records_.size(); ++i) {
         const auto& item = record_at({i, std::nullopt, false});
@@ -838,8 +1089,8 @@ void DxfDocument::rebuild_indexes() {
             type != "BLOCK" && type != "ENDBLK" && type != "VERTEX" && type != "SEQEND" && type != "ATTRIB")
             entity_records_.push_back(i);
         if (const auto* sequence_record = sequence(records_[i])) {
-            for (std::size_t j = 0; j < sequence_record->vertices_.size(); ++j)
-                include(sequence_record->vertices_[j], {i, j, false});
+            for (std::size_t j = 0; j < sequence_record->children_.size(); ++j)
+                include(sequence_record->children_[j], {i, j, false});
             if (sequence_record->seqend_) include(*sequence_record->seqend_, {i, std::nullopt, true});
         }
     }
@@ -1024,18 +1275,31 @@ DxfEntity DxfDocument::make_entity(std::string type, std::string subclass,
 }
 
 std::uint64_t DxfDocument::insert_entity(Record entry, EntitySpace space) {
+    EntityOptions options;options.space=space;return insert_entity(std::move(entry),options);
+}
+std::uint64_t DxfDocument::insert_entity(Record entry, const EntityOptions& options) {
+    const auto space=options.space;
     if (space != EntitySpace::Model && space != EntitySpace::Paper)
         throw std::invalid_argument("Invalid entity space");
-    const auto name = space == EntitySpace::Model ? "*Model_Space" : "*Paper_Space";
+    std::string name = options.block_name.empty() ? (space == EntitySpace::Model ? "*Model_Space" : "*Paper_Space") : options.block_name;
+    if(!options.layout_name.empty()){
+        if(!options.block_name.empty())throw std::invalid_argument("Choose a block or a layout, not both");
+        const auto* layout=get_layout(options.layout_name);
+        const auto* block=layout?block_record(layout->block_record_handle()):nullptr;
+        if(!block)throw std::invalid_argument("Unknown layout or invalid layout block");
+        name=block->name();
+    }
     const DxfBlockRecord* owner = nullptr;
     for_each<DxfBlockRecord>([&](const auto& block) {
-        if (!ascii_equal(block.name(), name)) return;
+        if (detail::symbol_name_key(block.name()) != detail::symbol_name_key(name)) return;
         if (owner) throw std::invalid_argument("Ambiguous space block name");
         owner = &block;
     });
     if (!owner || !handle_value(owner->handle()) || records_with_handle(owner->handle()).size() != 1)
         throw std::invalid_argument("Missing or ambiguous space block handle");
     const auto owner_handle = owner->handle();
+    const bool paper=owner->is_paper_space();
+    const bool named=!owner->is_model_space()&&!owner->is_paper_space();
 
     std::optional<std::size_t> end;
     bool inside = false, seen = false;
@@ -1057,13 +1321,30 @@ std::uint64_t DxfDocument::insert_entity(Record entry, EntitySpace space) {
     }
     if (inside) throw std::invalid_argument("Unterminated ENTITIES section");
 
+    if(named){
+        end.reset();std::string section;bool active=false;unsigned matches=0;
+        for(std::size_t i=0;i<records_.size();++i){const auto& r=record_at({i,std::nullopt,false});
+            if(r.type()=="SECTION")section=r.field("",2);
+            if(r.type()=="ENDSEC")section.clear();
+            if(section!="BLOCKS")continue;
+            if(r.type()=="BLOCK"){
+                if(active)throw std::invalid_argument("Unterminated named block");
+                active=handle_value(r.owner_handle())==handle_value(owner_handle);
+                if(active)++matches;
+            }else if(r.type()=="ENDBLK"&&active){
+                if(handle_value(r.owner_handle())!=handle_value(owner_handle))throw std::invalid_argument("Inconsistent block terminator owner");
+                end=i;active=false;
+            }
+        }
+        if(active||matches!=1||!end)throw std::invalid_argument("Missing or ambiguous named block boundaries");
+    }
     // Commit together: allocation, ownership, insertion and index rebuilding.
     DxfDocument staged = *this;
     const auto handle = staged.allocate_handle();
     std::visit([&](DxfRecord& record) {
         record.set_field("", 5, hex_handle(handle));
         record.set_field("", 330, owner_handle);
-        if (space == EntitySpace::Paper) record.set_short_field("AcDbEntity", 67, 1);
+        if (paper) record.set_short_field("AcDbEntity", 67, 1);
     }, entry);
     if (auto* compound = sequence(entry)) {
         auto assign = [&](DxfRecord& child) {
@@ -1071,9 +1352,9 @@ std::uint64_t DxfDocument::insert_entity(Record entry, EntitySpace space) {
             if (!child.handle().empty()) return;
             child.set_field("", 5, hex_handle(staged.allocate_handle()));
             child.set_field("", 330, hex_handle(handle));
-            if (space == EntitySpace::Paper) child.set_short_field("AcDbEntity", 67, 1);
+            if (paper) child.set_short_field("AcDbEntity", 67, 1);
         };
-        for (auto& child : compound->vertices_) assign(child);
+        for (auto& child : compound->children_) assign(child);
         if (compound->seqend_) assign(*compound->seqend_);
     }
     if (end) {
@@ -1089,6 +1370,7 @@ std::uint64_t DxfDocument::insert_entity(Record entry, EntitySpace space) {
             std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
     }
     staged.rebuild_indexes();
+    staged.record_entity_before(handle, std::nullopt);
     *this = std::move(staged);
     return handle;
 }
@@ -1098,7 +1380,30 @@ std::uint64_t DxfDocument::add_line(Point3 start, Point3 end, const EntityOption
     static_cast<DxfEntity&>(line) = make_entity("LINE", "AcDbLine", options);
     line.set_start(start);
     line.set_end(end);
-    return insert_entity(std::move(line), options.space);
+    return insert_entity(std::move(line), options);
+}
+
+std::uint64_t DxfDocument::add_point(Point3 location, const EntityOptions& options) {
+    DxfPoint entity;
+    static_cast<DxfEntity&>(entity) = make_entity("POINT", "AcDbPoint", options);
+    entity.set_location(location);
+    return insert_entity(std::move(entity), options);
+}
+std::uint64_t DxfDocument::add_ray(Point3 base, Vector3 direction, const EntityOptions& options) {
+    if (version_ == DxfVersion::AC1009) throw std::invalid_argument("RAY requires R13 or later");
+    DxfRay entity;
+    static_cast<DxfEntity&>(entity) = make_entity("RAY", "AcDbRay", options);
+    entity.set_base_point(base);
+    entity.set_direction(direction);
+    return insert_entity(std::move(entity), options);
+}
+std::uint64_t DxfDocument::add_xline(Point3 base, Vector3 direction, const EntityOptions& options) {
+    if (version_ == DxfVersion::AC1009) throw std::invalid_argument("XLINE requires R13 or later");
+    DxfXLine entity;
+    static_cast<DxfEntity&>(entity) = make_entity("XLINE", "AcDbXline", options);
+    entity.set_base_point(base);
+    entity.set_direction(direction);
+    return insert_entity(std::move(entity), options);
 }
 
 std::uint64_t DxfDocument::add_circle(Point3 center, double radius, const EntityOptions& options) {
@@ -1106,7 +1411,7 @@ std::uint64_t DxfDocument::add_circle(Point3 center, double radius, const Entity
     static_cast<DxfEntity&>(circle) = make_entity("CIRCLE", "AcDbCircle", options);
     circle.set_center(center);
     circle.set_radius(radius);
-    return insert_entity(std::move(circle), options.space);
+    return insert_entity(std::move(circle), options);
 }
 
 // Ported from entities/{arc,ellipse,lwpolyline,polyline2d,polyline3d,polygon_mesh,polyface_mesh}
@@ -1120,7 +1425,7 @@ std::uint64_t DxfDocument::add_arc(Point3 center, double radius, double start, d
     if (version_ != DxfVersion::AC1009) arc.pairs_.push_back({100, "AcDbArc"});
     arc.set_start_angle_radians(start);
     arc.set_end_angle_radians(end);
-    return insert_entity(std::move(arc), options.space);
+    return insert_entity(std::move(arc), options);
 }
 
 std::uint64_t DxfDocument::add_ellipse(Point3 center, Point3 major, double ratio,
@@ -1135,7 +1440,7 @@ std::uint64_t DxfDocument::add_ellipse(Point3 center, Point3 major, double ratio
     ellipse.set_start_parameter(start);
     ellipse.set_end_parameter(end);
     ellipse.set_normal(normal);
-    return insert_entity(std::move(ellipse), options.space);
+    return insert_entity(std::move(ellipse), options);
 }
 
 std::uint64_t DxfDocument::add_lwpolyline(const std::vector<LwVertex>& vertices, bool closed,
@@ -1153,7 +1458,7 @@ std::uint64_t DxfDocument::add_lwpolyline(const std::vector<LwVertex>& vertices,
             polyline.pairs_.push_back({pair.first, polyline.encode_number(pair.second)});
         polyline.pairs_.push_back({91, binary_ ? detail::binary_int32_bits(v.vertex_id) : std::to_string(v.vertex_id)});
     }
-    return insert_entity(std::move(polyline), options.space);
+    return insert_entity(std::move(polyline), options);
 }
 
 void DxfDocument::initialize_sequence(DxfVertexSequence& entity, std::string_view subclass,
@@ -1168,7 +1473,7 @@ void DxfDocument::initialize_sequence(DxfVertexSequence& entity, std::string_vie
         if (version_ != DxfVersion::AC1009) child.pairs_.push_back({100, std::string(vertex_subclass)});
         child.set_point(vertex_subclass, 10, p);
         child.set_short_field(vertex_subclass, 70, vertex_flags);
-        entity.vertices_.push_back(std::move(child));
+        entity.children_.push_back(std::move(child));
     }
     auto end = make_record("SEQEND");
     if (version_ != DxfVersion::AC1009) end.pairs_.push_back({100, "AcDbEntity"});
@@ -1187,14 +1492,14 @@ std::uint64_t DxfDocument::add_polyline2d(const std::vector<LwVertex>& vertices,
         polyline.set_vertex_widths(i, vertices[i].start_width, vertices[i].end_width);
         polyline.set_bulge(i, vertices[i].bulge);
     }
-    return insert_entity(std::move(polyline), options.space);
+    return insert_entity(std::move(polyline), options);
 }
 
 std::uint64_t DxfDocument::add_polyline3d(const std::vector<Point3>& vertices, bool closed,
                                          const EntityOptions& options) {
     DxfPolyline3D polyline;
     initialize_sequence(polyline, polyline3d, 8 | (closed ? 1 : 0), vertices, vertex3d, 32, options);
-    return insert_entity(std::move(polyline), options.space);
+    return insert_entity(std::move(polyline), options);
 }
 
 std::uint64_t DxfDocument::add_polygon_mesh(int m, int n, const std::vector<Point3>& vertices,
@@ -1207,7 +1512,7 @@ std::uint64_t DxfDocument::add_polygon_mesh(int m, int n, const std::vector<Poin
                         vertices, mesh_vertex, 64, options);
     mesh.set_short_field(polygon_mesh, 71, m);
     mesh.set_short_field(polygon_mesh, 72, n);
-    return insert_entity(std::move(mesh), options.space);
+    return insert_entity(std::move(mesh), options);
 }
 
 std::uint64_t DxfDocument::add_polyface_mesh(const std::vector<Point3>& vertices,
@@ -1222,11 +1527,11 @@ std::uint64_t DxfDocument::add_polyface_mesh(const std::vector<Point3>& vertices
         auto face = make_entity("VERTEX", std::string(face_record), options);
         face.set_point(face_record, 10, {0,0,0});
         face.set_short_field(face_record, 70, 128);
-        mesh.vertices_.push_back(std::move(face));
+        mesh.children_.push_back(std::move(face));
     }
     mesh.index_children();
     for (std::size_t i = 0; i < faces.size(); ++i) mesh.set_face_indices(i, faces[i]);
-    return insert_entity(std::move(mesh), options.space);
+    return insert_entity(std::move(mesh), options);
 }
 
 std::uint64_t DxfDocument::add_text(std::string value, Point3 insertion, double height,
@@ -1249,7 +1554,7 @@ std::uint64_t DxfDocument::add_text(std::string value, Point3 insertion, double 
     text.set_short_field("AcDbText", 72, 0);
     if (version_ != DxfVersion::AC1009) text.pairs_.push_back({100, "AcDbText"});
     text.pairs_.push_back({73, binary_ ? detail::binary_short(0) : "0"});
-    return insert_entity(std::move(text), options.space);
+    return insert_entity(std::move(text), options);
 }
 
 std::uint64_t DxfDocument::copy_entity(std::uint64_t handle, EntitySpace space) {
@@ -1257,6 +1562,11 @@ std::uint64_t DxfDocument::copy_entity(std::uint64_t handle, EntitySpace space) 
 }
 
 std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace space) {
+    EntityOptions target;target.space=space;return copy_entity(handle,target);
+}
+std::uint64_t DxfDocument::copy_entity(std::uint64_t handle, const EntityOptions& target) {return copy_entity(hex_handle(handle),target);}
+std::uint64_t DxfDocument::copy_entity(std::string_view handle, const EntityOptions& target) {
+    const auto space=target.space;
     const auto identity = handle_value(handle);
     const auto found = handle_index_.find(identity);
     if (!identity || found == handle_index_.end() || found->second.size() != 1)
@@ -1268,17 +1578,21 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
     const auto* path3d = std::get_if<DxfPolyline3D>(&records_[location.record]);
     const auto* mesh = std::get_if<DxfPolygonMesh>(&records_[location.record]);
     const auto* polyface = std::get_if<DxfPolyfaceMesh>(&records_[location.record]);
-    const DxfVertexSequence* path = path2d;
+    const auto* insert = std::get_if<DxfInsert>(&records_[location.record]);
+    const DxfCompoundEntity* path = path2d;
     if (path3d) path = path3d;
     if (mesh) path = mesh;
     if (polyface) path = polyface;
+    if (insert) path = insert;
     if (location.vertex || location.seqend ||
         std::find(entity_records_.begin(), entity_records_.end(), location.record) == entity_records_.end() ||
-        (type != "LINE" && type != "CIRCLE" && type != "ARC" && type != "ELLIPSE" && type != "TEXT" && type != "LWPOLYLINE" && !path))
+        (type != "ACDBPOINTCLOUD" && type != "ACDBPOINTCLOUDEX" && type != "CAMERA" && type != "SECTIONOBJECT" && type != "ARCALIGNEDTEXT" && type != "RTEXT" && type != "POSITIONMARKER" && type != "COORDINATION_MODEL" && type != "OLEFRAME" && type != "LAYOUTPRINTCONFIG" && type != "Format" && type != "OLE2FRAME" && type != "LIGHT" && type != "SECTIONLINE" && type != "DRAWINGVIEW" && type != "ACAD_PROXY_ENTITY" && type != "SHAPE" && type != "IMAGE" && type != "WIPEOUT" && type != "PDFUNDERLAY" && type != "DWFUNDERLAY" && type != "DGNUNDERLAY" && type != "LINE" && type != "POINT" && type != "RAY" && type != "XLINE" && type != "SOLID" && type != "TRACE" && type != "3DFACE" && type != "MESH" && type != "SPLINE" && type != "HELIX" && type != "MTEXT" && type != "HATCH" && type != "MPOLYGON" && type != "MLINE" && type != "MULTILEADER" && type != "ACAD_TABLE" && type != "DIMENSION" && type != "ARC_DIMENSION" && type != "LARGE_RADIAL_DIMENSION" && type != "LEADER" && type != "TOLERANCE" && type != "VIEWPORT" && type != "CIRCLE" && type != "ARC" && type != "ELLIPSE" && type != "TEXT" && type != "ATTDEF" && type != "LWPOLYLINE" && !std::holds_alternative<DxfSemanticEntity>(records_[location.record]) && !std::holds_alternative<DxfModelerEntity>(records_[location.record]) && !path))
         throw std::invalid_argument("Copy supports basic entities and parsed traditional POLYLINE sequences only");
+    if(std::holds_alternative<DxfModelerEntity>(records_[location.record]))validate_history_mutation(identity);
+    const auto modeler_payload = std::holds_alternative<DxfModelerEntity>(records_[location.record]) ? modeler_payload_record(identity) : std::nullopt;
     std::vector<const DxfRecord*> roots{&source};
     if (path) {
-        if (!path->seqend_) throw std::invalid_argument("Cannot copy an unterminated POLYLINE sequence");
+        if (!path->seqend_ && (!insert || !path->children_.empty() || source.short_field(insert->subclass(),66,0)==1)) throw std::invalid_argument("Cannot copy an unterminated compound sequence");
         auto include = [&](const DxfRecord& child) {
             const auto owner = child.owner_handle();
             if (!owner.empty()) {
@@ -1288,8 +1602,8 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
             }
             roots.push_back(&child);
         };
-        for (const auto& child : path->vertices_) include(child);
-        include(*path->seqend_);
+        for (const auto& child : path->children_) include(child);
+        if(path->seqend_)include(*path->seqend_);
     }
     const auto entity_records = roots.size();
     const auto tree = extension_tree(roots);
@@ -1330,7 +1644,7 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
     for (const auto& record : records_) {
         std::visit(check_external, record);
         if (const auto* children = sequence(record)) {
-            for (const auto& child : children->vertices_) check_external(child);
+            for (const auto& child : children->children_) check_external(child);
             if (children->seqend_) check_external(*children->seqend_);
         }
     }
@@ -1344,15 +1658,41 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
     else if (path3d) { DxfPolyline3D entity = *path3d; initialize(entity); entry = std::move(entity); }
     else if (mesh) { DxfPolygonMesh entity = *mesh; initialize(entity); entry = std::move(entity); }
     else if (polyface) { DxfPolyfaceMesh entity = *polyface; initialize(entity); entry = std::move(entity); }
+    else if (insert) { DxfInsert entity = *insert; initialize(entity); entry = std::move(entity); }
+    else if (std::holds_alternative<DxfSemanticEntity>(records_[location.record])) { DxfSemanticEntity entity; initialize(entity); entry=std::move(entity); }
+    else if (std::holds_alternative<DxfModelerEntity>(records_[location.record])) { DxfModelerEntity entity; initialize(entity); entry=std::move(entity); }
     else if (type == "LINE") { DxfLine entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "POINT") { DxfPoint entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "RAY") { DxfRay entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "XLINE") { DxfXLine entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "SOLID" || type == "TRACE") { DxfSolid entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "3DFACE") { DxfFace3D entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "MESH") { DxfMesh entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "SPLINE") { DxfSpline entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "HELIX") { DxfHelix entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "DIMENSION" || type == "ARC_DIMENSION" || type == "LARGE_RADIAL_DIMENSION") { DxfDimension entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "ACDBPOINTCLOUD" || type == "ACDBPOINTCLOUDEX" || type == "CAMERA" || type == "SECTIONOBJECT" || type == "ARCALIGNEDTEXT" || type == "RTEXT" || type == "POSITIONMARKER" || type == "COORDINATION_MODEL" || type == "OLEFRAME" || type == "LAYOUTPRINTCONFIG" || type == "Format" || type == "OLE2FRAME" || type == "LIGHT" || type == "SECTIONLINE" || type == "DRAWINGVIEW") { DxfExtendedEntity entity; initialize(entity); entry=std::move(entity); }
+    else if (type == "ACAD_PROXY_ENTITY") { DxfProxyEntity entity; initialize(entity); entry=std::move(entity); }
+    else if (type == "SHAPE") { DxfShape entity; initialize(entity); entry=std::move(entity); }
+    else if (type == "IMAGE" || type == "WIPEOUT") { DxfRasterImage entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "PDFUNDERLAY" || type == "DWFUNDERLAY" || type == "DGNUNDERLAY") { DxfUnderlay entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "ACAD_TABLE") { DxfTable entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "MULTILEADER") { DxfMultiLeader entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "MLINE") { DxfMLine entity; initialize(entity); entry = std::move(entity); }
+    else if ((type == "HATCH" || type == "MPOLYGON")) { DxfHatch entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "LEADER") { DxfLeader entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "TOLERANCE") { DxfTolerance entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "VIEWPORT") { DxfViewport entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "MTEXT") { DxfMText entity; initialize(entity); entry = std::move(entity); }
     else if (type == "CIRCLE") { DxfCircle entity; initialize(entity); entry = std::move(entity); }
     else if (type == "ARC") { DxfArc entity; initialize(entity); entry = std::move(entity); }
     else if (type == "ELLIPSE") { DxfEllipse entity; initialize(entity); entry = std::move(entity); }
+    else if (type == "ATTDEF") { DxfAttribute entity; initialize(entity); entry = std::move(entity); }
     else if (type == "TEXT") { DxfText entity; initialize(entity); entry = std::move(entity); }
     else { DxfLwPolyline entity; initialize(entity); entry = std::move(entity); }
 
     DxfDocument staged = *this;
-    const auto fresh = staged.insert_entity(std::move(entry), space);
+    const auto fresh = staged.insert_entity(std::move(entry), target);
     // Like Rust document/block_graph::import_block_graph, allocate the entire map first.
     std::unordered_map<std::uint64_t, std::uint64_t> remap{{identity, fresh}};
     for (std::size_t i = 1; i < tree.size(); ++i)
@@ -1378,7 +1718,7 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
                     p.code == 480 || p.code == 481 || p.code == 1005) change(p, true);
                 continue;
             }
-            if (!depth && p.code == 1001) xdata = true;
+            if (!depth && p.code == 1001) { xdata = true; opaque = false; }
             if (!depth && p.code == 101) opaque = true;
             if (!depth && !opaque && !xdata && p.code == 102 &&
                 (p.value == "{ACAD_REACTORS" || p.value == "{ACAD_XDICTIONARY")) {
@@ -1408,8 +1748,13 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
     // Parent ownership is a space BLOCK_RECORD; child ownership is the new parent.
     // Space flags and existing layout-name hints still describe that same space.
     const auto target_owner = copied.owner_handle();
+    const auto* target_block=staged.block_record(target_owner);
+    const bool target_paper=target_block&&target_block->is_paper_space();
+    const bool target_named=target_block&&!target_block->is_model_space()&&!target_paper;
+    if(type=="VIEWPORT"){int maximum=1;staged.for_each<DxfViewport>([&](const auto& e){if(handle_value(e.handle())!=fresh&&handle_value(e.owner_handle())==handle_value(target_owner))maximum=std::max(maximum,int(e.definition().id));});if(maximum==INT16_MAX)throw std::overflow_error("Viewport ID space exhausted");copied.set_short_field("AcDbViewport",69,target_paper?maximum+1:0);}
     auto set_space = [&](DxfRecord& record) {
-        record.set_short_field("AcDbEntity", 67, space == EntitySpace::Paper ? 1 : 0);
+        record.set_short_field("AcDbEntity", 67, target_paper ? 1 : 0);
+        if(target_named){std::vector<std::size_t> hints;record.locate_if("AcDbEntity",[&](std::size_t n,int code){if(code==410)hints.push_back(n);return false;});for(auto i=hints.rbegin();i!=hints.rend();++i)record.pairs_.erase(record.pairs_.begin()+*i);return;}
         if (record.locate("AcDbEntity", 410).found) {
             std::optional<std::string> layout_name;
             for (const auto& item : records_) {
@@ -1432,8 +1777,8 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
             child.set_field("", 330, hex_handle(fresh));
             set_space(child);
         };
-        for (auto& child : children->vertices_) remap_child(child);
-        remap_child(*children->seqend_);
+        for (auto& child : children->children_) remap_child(child);
+        if(children->seqend_)remap_child(*children->seqend_);
     }
     if (tree.size() > entity_records) {
         std::optional<std::size_t> objects_end;
@@ -1451,12 +1796,32 @@ std::uint64_t DxfDocument::copy_entity(std::string_view handle, EntitySpace spac
             DxfRecord object = *tree[i];
             object.set_field("", 5, hex_handle(remap.at(handle_value(object.handle()))));
             rewrite(object);
-            objects.emplace_back(std::move(object));
+            if(object.type()=="GROUP" || object.type()=="SCALE" || object.type()=="SORTENTSTABLE" || object.type()=="SPATIAL_FILTER" || object.type()=="DICTIONARYVAR" || object.type()=="DBCOLOR" || object.type()=="WIPEOUTVARIABLES") { DxfAuxiliaryObject typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="VISUALSTYLE" || object.type()=="GEODATA") { DxfDrawingObject typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(is_class_object_name(object.type())) { DxfClassObject typed;typed.version_=version_;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="ACAD_PROXY_OBJECT") { DxfProxyObject typed;typed.version_=version_;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="FIELD") { DxfField typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="FIELDLIST") { DxfFieldList typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="MATERIAL") { DxfMaterial typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="IMAGEDEF") { DxfImageDefinition typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="IMAGEDEF_REACTOR") { DxfImageReactor typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="RASTERVARIABLES") { DxfRasterVariables typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="PDFDEFINITION" || object.type()=="DWFDEFINITION" || object.type()=="DGNDEFINITION") { DxfUnderlayDefinition typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed)); } else if(object.type()=="TABLECONTENT" || object.type()=="TABLETEMPLATE") {
+                DxfTableContent typed;static_cast<DxfRecord&>(typed)=std::move(object);
+                objects.emplace_back(std::move(typed));
+            } else if(object.type()=="CELLSTYLEMAP") {
+                DxfCellStyleMap typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed));
+            } else if(object.type()=="TABLEGEOMETRY") {
+                DxfTableGeometry typed;static_cast<DxfRecord&>(typed)=std::move(object);
+                objects.emplace_back(std::move(typed));
+            } else if(known_object_context(object.type())){DxfObjectContext typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed));} else if(object.type() == "BREAKDATA" || object.type() == "BREAKPOINTREF" || object.type() == "ACDSRECORD" || object.type() == "ACDSSCHEMA" || object.type() == "DUMMY" || object.type() == "IDBUFFER" || object.type() == "INDEX" || object.type() == "LAYER_INDEX" || object.type() == "LONG_TRANSACTION" || object.type() == "OBJECT_PTR" || object.type() == "PARTIAL_VIEWING_FILTER" || object.type() == "ACDBPOINTCLOUDDEF" || object.type() == "ACDBPOINTCLOUDDEF_EX" || object.type() == "ACDBPOINTCLOUDDEF_REACTOR" || object.type() == "ACDBPOINTCLOUDDEF_REACTOR_EX" || object.type() == "ACDBPOINTCLOUDCOLORMAP" || object.type() == "NAVISWORKSMODELDEF" || object.type() == "CONTEXTDATAMANAGER"){DxfDataObject typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed));} else {bool registered=false;for(const auto& c:classes())if(c.name==object.type()&&!c.is_entity&&object.type()!="XRECORD"&&object.type()!="ACDBDICTIONARYWDFLT"&&object.type()!="ACDBPLACEHOLDER"&&object.type()!="PLOTSETTINGS"){DxfSemanticObject typed;static_cast<DxfRecord&>(typed)=std::move(object);objects.emplace_back(std::move(typed));registered=true;break;}if(!registered)objects.emplace_back(std::move(object));}
         }
         staged.records_.insert(staged.records_.begin() + *objects_end,
             std::make_move_iterator(objects.begin()), std::make_move_iterator(objects.end()));
     }
+    if (modeler_payload) {
+        DxfRecord payload=record_at({*modeler_payload,std::nullopt,false});
+        rewrite(payload);
+        std::optional<std::size_t> end;
+        std::string section;
+        for(std::size_t i=0;i<staged.records_.size();++i){const auto& r=staged.record_at({i,std::nullopt,false});if(r.type()=="SECTION")section=r.text_field("",2);else if(r.type()=="ENDSEC"){if(section=="ACDSDATA")end=i;section.clear();}}
+        if(!end)throw std::invalid_argument("Missing copied modeler payload section");
+        staged.records_.insert(staged.records_.begin()+*end,std::move(payload));
+    }
     staged.rebuild_indexes();
+    if(type=="ACDBPOINTCLOUD"||type=="ACDBPOINTCLOUDEX")staged.link_image_reactors(handle_value(source.field(type=="ACDBPOINTCLOUD"?"AcDbPointCloud":"AcDbPointCloudEx",type=="ACDBPOINTCLOUD"?330:340)));
+    if(type=="PDFUNDERLAY"||type=="DWFUNDERLAY"||type=="DGNUNDERLAY")staged.link_image_reactors(handle_value(source.field("AcDbUnderlayReference",340)));
+    if(type=="IMAGE"||type=="WIPEOUT")staged.link_image_reactors(handle_value(source.field(type=="IMAGE"?"AcDbRasterImage":"AcDbWipeout",340)));
     *this = std::move(staged);
     return fresh;
 }
@@ -1603,15 +1968,18 @@ bool DxfDocument::remove_entity(std::string_view handle) {
     const bool polyline = std::holds_alternative<DxfPolyline2D>(records_[location.record]) ||
                           std::holds_alternative<DxfPolyline3D>(records_[location.record]) ||
                           std::holds_alternative<DxfPolygonMesh>(records_[location.record]) ||
-                          std::holds_alternative<DxfPolyfaceMesh>(records_[location.record]);
+                          std::holds_alternative<DxfPolyfaceMesh>(records_[location.record]) ||
+                          std::holds_alternative<DxfInsert>(records_[location.record]);
     if (location.vertex || location.seqend ||
         std::find(entity_records_.begin(), entity_records_.end(), location.record) == entity_records_.end() ||
-        (type != "LINE" && type != "CIRCLE" && type != "ARC" && type != "ELLIPSE" && type != "TEXT" && type != "LWPOLYLINE" && !polyline))
-        throw std::invalid_argument("Removal supports LINE, CIRCLE, ARC, ELLIPSE, TEXT, LWPOLYLINE and parsed POLYLINE sequences only");
+        (type != "ACDBPOINTCLOUD" && type != "ACDBPOINTCLOUDEX" && type != "CAMERA" && type != "SECTIONOBJECT" && type != "ARCALIGNEDTEXT" && type != "RTEXT" && type != "POSITIONMARKER" && type != "COORDINATION_MODEL" && type != "OLEFRAME" && type != "LAYOUTPRINTCONFIG" && type != "Format" && type != "OLE2FRAME" && type != "LIGHT" && type != "SECTIONLINE" && type != "DRAWINGVIEW" && type != "ACAD_PROXY_ENTITY" && type != "SHAPE" && type != "IMAGE" && type != "WIPEOUT" && type != "PDFUNDERLAY" && type != "DWFUNDERLAY" && type != "DGNUNDERLAY" && type != "LINE" && type != "POINT" && type != "RAY" && type != "XLINE" && type != "SOLID" && type != "TRACE" && type != "3DFACE" && type != "MESH" && type != "SPLINE" && type != "HELIX" && type != "MTEXT" && type != "HATCH" && type != "MPOLYGON" && type != "MLINE" && type != "MULTILEADER" && type != "ACAD_TABLE" && type != "DIMENSION" && type != "ARC_DIMENSION" && type != "LARGE_RADIAL_DIMENSION" && type != "LEADER" && type != "TOLERANCE" && type != "VIEWPORT" && type != "CIRCLE" && type != "ARC" && type != "ELLIPSE" && type != "TEXT" && type != "ATTDEF" && type != "LWPOLYLINE" && !std::holds_alternative<DxfSemanticEntity>(records_[location.record]) && !std::holds_alternative<DxfModelerEntity>(records_[location.record]) && !polyline))
+        throw std::invalid_argument("Removal supports basic entities and parsed POLYLINE sequences only");
+    record_entity_before(identity, std::string(type));
 
     // Rust stores ordered vertices inside the parent entity. This representation also
     // retains SEQEND and indexes every child identity, so erase the whole owned sequence.
-    // Polyface face records and unclassified VERTEX records also live in vertices_.
+    if(std::holds_alternative<DxfModelerEntity>(records_[location.record]))validate_history_mutation(identity);
+    // Polyface face records and unclassified VERTEX records also live in children_.
     // Use that raw sequence, not the filtered coordinate/face views, to avoid orphaning children.
     std::unordered_set<std::uint64_t> doomed{identity};
     std::vector<const DxfRecord*> group{&target};
@@ -1637,12 +2005,14 @@ bool DxfDocument::remove_entity(std::string_view handle) {
             }
             group.push_back(&child);
         };
-        for (const auto& vertex : children->vertices_) include_child(vertex);
+        for (const auto& vertex : children->children_) include_child(vertex);
         if (children->seqend_) include_child(*children->seqend_);
     }
 
     group = extension_tree(std::move(group));
     std::unordered_set<std::size_t> removed_records{location.record};
+    if(std::holds_alternative<DxfModelerEntity>(records_[location.record]))
+        if(auto payload=modeler_payload_record(identity))removed_records.insert(*payload);
     for (const auto* member : group) {
         const auto h = handle_value(member->handle());
         if (h) {
@@ -1705,7 +2075,7 @@ bool DxfDocument::remove_entity(std::string_view handle) {
         if (removed_records.count(i)) continue;
         std::visit(clean_reactors, staged.records_[i]);
         if (auto* children = sequence(staged.records_[i])) {
-            for (auto& vertex : children->vertices_) clean_reactors(vertex);
+            for (auto& vertex : children->children_) clean_reactors(vertex);
             if (children->seqend_) clean_reactors(*children->seqend_);
         }
     }
@@ -1714,6 +2084,7 @@ bool DxfDocument::remove_entity(std::string_view handle) {
     retained.reserve(staged.records_.size() - removed_records.size());
     for (std::size_t i = 0; i < staged.records_.size(); ++i)
         if (!removed_records.count(i)) retained.push_back(std::move(staged.records_[i]));
+        else if(std::holds_alternative<DxfSemanticEntity>(staged.records_[i])||std::holds_alternative<DxfSemanticObject>(staged.records_[i])||std::holds_alternative<DxfDataObject>(staged.records_[i])||std::holds_alternative<DxfObjectContext>(staged.records_[i])||std::holds_alternative<DxfClassObject>(staged.records_[i]))staged.retired_registered_classes_.insert(staged.record_at({i,std::nullopt,false}).type());
     staged.records_ = std::move(retained);
     // Persist the reconciled allocator even if the source HANDSEED was missing/stale.
     staged.handle_reserved_ = true;
@@ -1754,7 +2125,8 @@ DxfDocument DxfDocument::read(std::istream& input) {
     DxfDocument doc;
     std::string section, table;
     const char* page = nullptr;
-    bool eof = false;
+    bool eof = false, in_block = false;
+    std::unordered_map<std::string,bool> registered_types;
     std::vector<DxfRecord::Pair> pairs;
     auto finish = [&] {
         if (pairs.empty()) return;
@@ -1762,10 +2134,12 @@ DxfDocument DxfDocument::read(std::istream& input) {
         std::string_view type = first.code == 0 ? trim(first.value) : std::string_view{};
         // A heavy sequence owns consecutive VERTEX records and its SEQEND.
         // A new top-level record ends the sequence even if SEQEND was omitted.
-        if ((section == "ENTITIES" || section == "BLOCKS") && !doc.records_.empty() && (type == "VERTEX" || type == "SEQEND")) {
+        if ((section == "ENTITIES" || section == "BLOCKS") && !doc.records_.empty() && (type == "VERTEX" || type == "ATTRIB" || type == "SEQEND")) {
             auto* parent = sequence(doc.records_.back());
-            if (parent && !parent->seqend_) {
-                DxfRecord& child = type == "VERTEX" ? parent->vertices_.emplace_back()
+            const auto* insert=std::get_if<DxfInsert>(&doc.records_.back());
+            const bool accepts=insert ? (insert->short_field(insert->subclass(),66,0)==1 && (type=="ATTRIB"||type=="SEQEND")) : (type=="VERTEX"||type=="SEQEND");
+            if (parent && !parent->seqend_ && accepts) {
+                DxfRecord& child = type != "SEQEND" ? parent->children_.emplace_back()
                                                     : parent->seqend_.emplace();
                 child.binary_ = doc.binary_;
                 child.pairs_.swap(pairs);
@@ -1815,8 +2189,74 @@ DxfDocument DxfDocument::read(std::istream& input) {
             record.emplace<DxfLineType>();
         } else if (section == "TABLES" && table == "LAYER" && type == "LAYER") {
             record.emplace<DxfLayer>();
-        } else if (section == "ENTITIES" || (section == "BLOCKS" && type == "POLYLINE")) {
-            if (type == "LINE") record.emplace<DxfLine>();
+        } else if (section == "OBJECTS" && known_object_context(type)) {
+            record.emplace<DxfObjectContext>();
+        } else if (section == "OBJECTS" && (type == "BREAKDATA" || type == "BREAKPOINTREF" || type == "ACDSRECORD" || type == "ACDSSCHEMA" || type == "DUMMY" || type == "IDBUFFER" || type == "INDEX" || type == "LAYER_INDEX" || type == "LONG_TRANSACTION" || type == "OBJECT_PTR" || type == "PARTIAL_VIEWING_FILTER" || type == "ACDBPOINTCLOUDDEF" || type == "ACDBPOINTCLOUDDEF_EX" || type == "ACDBPOINTCLOUDDEF_REACTOR" || type == "ACDBPOINTCLOUDDEF_REACTOR_EX" || type == "ACDBPOINTCLOUDCOLORMAP" || type == "NAVISWORKSMODELDEF" || type == "CONTEXTDATAMANAGER")) {
+            record.emplace<DxfDataObject>();
+        } else if (section == "OBJECTS" && (type == "GROUP" || type == "SCALE" || type == "SORTENTSTABLE" || type == "SPATIAL_FILTER" || type == "DICTIONARYVAR" || type == "DBCOLOR" || type == "WIPEOUTVARIABLES")) {
+            record.emplace<DxfAuxiliaryObject>();
+        } else if (section == "OBJECTS" && (type == "VISUALSTYLE" || type == "GEODATA")) {
+            record.emplace<DxfDrawingObject>();
+        } else if (section == "OBJECTS" && is_class_object_name(type)) {
+            record.emplace<DxfClassObject>();
+        } else if (section == "OBJECTS" && type == "ACAD_PROXY_OBJECT") {
+            record.emplace<DxfProxyObject>();
+        } else if (section == "OBJECTS" && type == "FIELD") {
+            record.emplace<DxfField>();
+        } else if (section == "OBJECTS" && type == "FIELDLIST") {
+            record.emplace<DxfFieldList>();
+        } else if (section == "OBJECTS" && type == "MATERIAL") {
+            record.emplace<DxfMaterial>();
+        } else if (section == "OBJECTS" && type == "IMAGEDEF") {
+            record.emplace<DxfImageDefinition>();
+        } else if (section == "OBJECTS" && type == "IMAGEDEF_REACTOR") {
+            record.emplace<DxfImageReactor>();
+        } else if (section == "OBJECTS" && type == "RASTERVARIABLES") {
+            record.emplace<DxfRasterVariables>();
+        } else if (section == "OBJECTS" && (type == "PDFDEFINITION" || type == "DWFDEFINITION" || type == "DGNDEFINITION")) {
+            record.emplace<DxfUnderlayDefinition>();
+        } else if (section == "OBJECTS" && type == "CELLSTYLEMAP") {
+            record.emplace<DxfCellStyleMap>();
+        } else if (section == "OBJECTS" && type == "TABLEGEOMETRY") {
+            record.emplace<DxfTableGeometry>();
+        } else if (section == "OBJECTS" && (type == "TABLECONTENT" || type == "TABLETEMPLATE")) {
+            record.emplace<DxfTableContent>();
+        } else if (section == "OBJECTS" && type == "TABLESTYLE") {
+            record.emplace<DxfTableStyle>();
+        } else if (section == "OBJECTS" && type == "MLEADERSTYLE") {
+            record.emplace<DxfMultiLeaderStyle>();
+        } else if (section == "OBJECTS" && type == "MLINESTYLE") {
+            record.emplace<DxfMLineStyle>();
+        } else if (section == "OBJECTS" && type == "LAYOUT") {
+            record.emplace<DxfLayout>();
+        } else if (section == "ENTITIES" || (section == "BLOCKS" &&
+                   (in_block || type == "BLOCK" || type == "POLYLINE" || type == "POINT" || type == "RAY" || type == "XLINE" || type == "SOLID" || type == "TRACE" || type == "3DFACE" || type == "SPLINE" || type == "HELIX" || type == "MTEXT"))) {
+            if (type == "BLOCK") record.emplace<DxfBlock>();
+            else if (type == "INSERT") record.emplace<DxfInsert>();
+            else if (type == "TOLERANCE") record.emplace<DxfTolerance>();
+            else if (type == "DIMENSION" || type == "ARC_DIMENSION" || type == "LARGE_RADIAL_DIMENSION") record.emplace<DxfDimension>();
+            else if ((type == "HATCH" || type == "MPOLYGON")) record.emplace<DxfHatch>();
+            else if (type == "MLINE") record.emplace<DxfMLine>();
+            else if (type == "MULTILEADER") record.emplace<DxfMultiLeader>();
+            else if (type == "ACDBPOINTCLOUD" || type == "ACDBPOINTCLOUDEX" || type == "CAMERA" || type == "SECTIONOBJECT" || type == "ARCALIGNEDTEXT" || type == "RTEXT" || type == "POSITIONMARKER" || type == "COORDINATION_MODEL" || type == "OLEFRAME" || type == "LAYOUTPRINTCONFIG" || type == "Format" || type == "OLE2FRAME" || type == "LIGHT" || type == "SECTIONLINE" || type == "DRAWINGVIEW") record.emplace<DxfExtendedEntity>();
+            else if (type == "ACAD_PROXY_ENTITY") record.emplace<DxfProxyEntity>();
+            else if (type == "SHAPE") record.emplace<DxfShape>();
+            else if (type == "IMAGE" || type == "WIPEOUT") record.emplace<DxfRasterImage>();
+            else if (type == "PDFUNDERLAY" || type == "DWFUNDERLAY" || type == "DGNUNDERLAY") record.emplace<DxfUnderlay>();
+            else if (type == "ACAD_TABLE") record.emplace<DxfTable>();
+            else if (type == "LEADER") record.emplace<DxfLeader>();
+            else if (type == "3DSOLID" || type == "REGION" || type == "BODY" || type == "SURFACE" || type == "PLANESURFACE" || type == "EXTRUDEDSURFACE" || type == "LOFTEDSURFACE" || type == "REVOLVEDSURFACE" || type == "SWEPTSURFACE" || type == "NURBSURFACE") record.emplace<DxfModelerEntity>();
+            else if (type == "LINE") record.emplace<DxfLine>();
+            else if (type == "POINT") record.emplace<DxfPoint>();
+            else if (type == "RAY") record.emplace<DxfRay>();
+            else if (type == "XLINE") record.emplace<DxfXLine>();
+            else if (type == "SOLID" || type == "TRACE") record.emplace<DxfSolid>();
+            else if (type == "3DFACE") record.emplace<DxfFace3D>();
+            else if (type == "MESH") record.emplace<DxfMesh>();
+            else if (type == "SPLINE") record.emplace<DxfSpline>();
+            else if (type == "HELIX") record.emplace<DxfHelix>();
+            else if (type == "MTEXT") record.emplace<DxfMText>();
+            else if (type == "VIEWPORT") record.emplace<DxfViewport>();
             else if (type == "CIRCLE") record.emplace<DxfCircle>();
             else if (type == "ARC") record.emplace<DxfArc>();
             else if (type == "ELLIPSE") record.emplace<DxfEllipse>();
@@ -1841,8 +2281,21 @@ DxfDocument DxfDocument::read(std::istream& input) {
             }
             else if (type == "LWPOLYLINE") record.emplace<DxfLwPolyline>();
             else if (type == "TEXT") record.emplace<DxfText>();
+            else if (type == "ATTDEF") record.emplace<DxfAttribute>();
         }
+        if(std::holds_alternative<DxfRecord>(record)&&(section=="OBJECTS"||section=="ENTITIES"||(section=="BLOCKS"&&in_block))&&type!="ENDBLK"&&type!="ACDBDICTIONARYWDFLT"&&type!="XRECORD"&&type!="ACDBPLACEHOLDER"&&type!="PLOTSETTINGS"){
+            auto registered=registered_types.find(std::string(type));
+            if(registered!=registered_types.end()){if(registered->second&&section!="OBJECTS")record.emplace<DxfSemanticEntity>();else if(!registered->second&&section=="OBJECTS")record.emplace<DxfSemanticObject>();}
+        }
+        if(section=="CLASSES"&&type=="CLASS"){
+            std::string name;bool entity=false;
+            for(const auto& p:pairs){if(p.code==1)name=detail::from_legacy(p.value,page);if(p.code==281)entity=detail::as_i16(p.code,p.value,doc.binary_).value_or(0)!=0;}
+            if(!name.empty())registered_types[name]=entity;
+        }
+        if(section=="BLOCKS"&&type=="BLOCK")in_block=true;
+        if(type=="ENDBLK"||type=="ENDSEC")in_block=false;
         std::visit([&](DxfRecord& item) {
+            item.binary_ = doc.binary_;
             item.pairs_.swap(pairs);
         }, record);
         doc.records_.push_back(std::move(record));
@@ -1885,11 +2338,13 @@ DxfDocument DxfDocument::read(std::istream& input) {
         std::visit([&](auto& item) {
             item.code_page_ = page;
             item.binary_ = doc.binary_;
-            if constexpr (std::is_base_of_v<DxfEntity, std::decay_t<decltype(item)>>)
+            if constexpr (std::is_base_of_v<DxfEntity, std::decay_t<decltype(item)>> ||
+                          std::is_same_v<DxfProxyObject, std::decay_t<decltype(item)>> ||
+                          std::is_same_v<DxfClassObject, std::decay_t<decltype(item)>>)
                 item.version_ = doc.version_;
         }, record);
         if (auto* path = sequence(record)) {
-            for (auto& vertex : path->vertices_) vertex.code_page_ = page;
+            for (auto& vertex : path->children_) vertex.code_page_ = page;
             if (path->seqend_) path->seqend_->code_page_ = page;
         }
         if (auto* mesh = std::get_if<DxfPolyfaceMesh>(&record)) mesh->index_children();
@@ -1907,6 +2362,43 @@ std::uint64_t DxfDocument::allocate_handle() {
 
 #include "dxf_symbols.inc"
 #include "dxf_references.inc"
+#include "dxf_audit.inc"
+#include "dxf_blocks.inc"
+#include "dxf_text.inc"
+#include "dxf_layout.inc"
+#include "dxf_xdata.inc"
+#include "dxf_table_definitions.inc"
+#include "dxf_annotations.inc"
+#include "dxf_hatch.inc"
+#include "dxf_dimension.inc"
+#include "dxf_mline.inc"
+#include "dxf_multileader.inc"
+#include "dxf_table.inc"
+#include "dxf_table_content.inc"
+#include "dxf_table_geometry.inc"
+#include "dxf_cell_style_map.inc"
+#include "dxf_external_reference.inc"
+#include "dxf_shape_common.inc"
+#include "dxf_material.inc"
+#include "dxf_field.inc"
+#include "dxf_table_fields.inc"
+#include "dxf_text_fields.inc"
+#include "dxf_proxy.inc"
+#include "dxf_auxiliary.inc"
+#include "dxf_drawing_variables.inc"
+#include "dxf_stage8_parity.inc"
+#include "dxf_group.inc"
+#include "dxf_xrecord.inc"
+#include "dxf_extended_entity.inc"
+#include "dxf_polyline_properties.inc"
+#include "dxf_drawing_object.inc"
+#include "dxf_class_object.inc"
+#include "dxf_object_data.inc"
+#include "dxf_semantic_property.inc"
+#include "dxf_object_context.inc"
+#include "dxf_data_object.inc"
+#include "dxf_surface.inc"
+#include "dxf_modeler.inc"
 
 void DxfDocument::write(std::ostream& out, bool binary) const {
     if (binary == binary_) { write(out); return; }
@@ -1929,7 +2421,7 @@ void DxfDocument::write(std::ostream& out, bool binary) const {
     for (auto& record : converted.records_) {
         std::visit(convert, record);
         if (auto* compound = sequence(record)) {
-            for (auto& vertex : compound->vertices_) convert(vertex);
+            for (auto& vertex : compound->children_) convert(vertex);
             if (compound->seqend_) convert(*compound->seqend_);
         }
     }
@@ -1940,8 +2432,59 @@ void DxfDocument::write(std::ostream& out, bool binary) const {
 
 void DxfDocument::write(std::ostream& out) const {
     if (binary_) out.write(detail::binary_signature.data(), detail::binary_signature.size());
+    // Class instance counts are derived metadata; stale zero counts can hide class-based entities.
+    std::unordered_set<std::string> counted_classes{"FIELD", "FIELDLIST", "MATERIAL", "IMAGE", "WIPEOUT", "IMAGEDEF", "IMAGEDEF_REACTOR", "RASTERVARIABLES", "PDFUNDERLAY", "DWFUNDERLAY", "DGNUNDERLAY", "PDFDEFINITION", "DWFDEFINITION", "DGNDEFINITION", "CELLSTYLEMAP", "TABLETEMPLATE", "TABLECONTENT", "TABLEGEOMETRY", "ACAD_TABLE", "TABLESTYLE", "MULTILEADER", "MLEADERSTYLE", "LAYOUT", "HELIX", "ARC_DIMENSION", "LARGE_RADIAL_DIMENSION"};
+    // Keep unrelated legacy class metadata unchanged. Generic classes that lost
+    // their last instance still need a zero count after an explicit deletion.
+    counted_classes.insert(retired_registered_classes_.begin(),retired_registered_classes_.end());
+    for_each<DxfSemanticEntity>([&](const auto& e){counted_classes.insert(e.type());});
+    for(const auto* name:{"VISUALSTYLE","GEODATA","GROUP","SCALE","SORTENTSTABLE","SPATIAL_FILTER","DICTIONARYVAR","DBCOLOR","WIPEOUTVARIABLES","CAMERA","SECTIONOBJECT","ARCALIGNEDTEXT","RTEXT","POSITIONMARKER","COORDINATION_MODEL","OLEFRAME","LAYOUTPRINTCONFIG","Format","OLE2FRAME","LIGHT","SECTIONLINE","DRAWINGVIEW","MPOLYGON","ACDBPOINTCLOUD","ACDBPOINTCLOUDEX"})counted_classes.insert(name);
+    for_each<DxfSemanticObject>([&](const auto& e){counted_classes.insert(e.type());});
+    for_each<DxfDataObject>([&](const auto& e){counted_classes.insert(e.type());});
+    for_each<DxfObjectContext>([&](const auto& e){counted_classes.insert(e.type());});
+    for_each<DxfClassObject>([&](const auto& e){counted_classes.insert(e.type());});
+    counted_classes.insert("ACAD_PROXY_ENTITY");
+    std::string arch_section;
+    for (const auto& item : records_) std::visit([&](const DxfRecord& r) {
+        if (is_architecture_name(r.type()))
+            counted_classes.insert(r.type());
+        if (r.type() == "SECTION")
+            arch_section = r.field("", 2);
+        else if (r.type() == "ENDSEC")
+            arch_section.clear();
+    }, item);
+    std::unordered_map<std::string, std::int32_t> class_counts;
+    arch_section.clear();
+    for (const auto& item : records_) std::visit([&](const DxfRecord& r) {
+        if (r.type() == "SECTION")
+            arch_section = r.field("", 2);
+        else if (r.type() == "ENDSEC")
+            arch_section.clear();
+        if (is_architecture_name(r.type())) {
+            auto written = architecture_written_record(r, arch_section);
+            if (!written)
+                return;
+            if (counted_classes.count(written->type()))
+                ++class_counts[written->type()];
+            return;
+        }
+        if (counted_classes.count(r.type())) ++class_counts[r.type()];
+    }, item);
     auto write_record = [&](const DxfRecord& item) {
-        for (const auto& p : item.pairs_) {
+        std::optional<DxfRecord> updated;
+        if (version_ >= DxfVersion::AC1018 && item.type() == "CLASS") {
+            const auto name = item.field("", 1);
+            if (counted_classes.count(name)) {
+                const auto count = class_counts[name];
+                const auto position = item.locate("", 91);
+                const auto stored = position.found ? detail::as_i32_bits(item.pairs_[position.index].value, binary_) : std::nullopt;
+                if (!stored || *stored != static_cast<std::uint32_t>(count)) {
+                    updated = item;
+                    updated->set_field("", 91, binary_ ? detail::binary_int32_bits(static_cast<std::uint32_t>(count)) : std::to_string(count));
+                }
+            }
+        }
+        for (const auto& p : (updated ? updated->pairs_ : item.pairs_)) {
             if (binary_) {
                 detail::write_binary_pair(out, compact_codes_, p.code, p.value);
                 continue;
@@ -1982,18 +2525,55 @@ void DxfDocument::write(std::ostream& out) const {
         write_header(std::move(header));
         write_record(end);
     }
+    std::string write_section;
     for (std::size_t i = 0; i < records_.size(); ++i) {
         const auto& record = records_[i];
         if (handle_reserved_ && header_index_ == i) {
             write_header(std::get<DxfRecord>(record));
             continue;
         }
-        std::visit(write_record, record);
+        std::visit([&](const auto &item) {
+            if (item.type() == "SECTION")
+                write_section = item.field("", 2);
+            else if (item.type() == "ENDSEC")
+                write_section.clear();
+            if (is_architecture_name(item.type())) {
+                auto written = architecture_written_record(item, write_section);
+                if (written)
+                    write_record(architecture_omit_adjust(*written));
+                return;
+            }
+            using T = std::decay_t<decltype(item)>;
+            if constexpr (std::is_base_of_v<DxfSpline, T>) {
+                if (item.locate("AcDbSpline", 11).found &&
+                    !item.locate("AcDbSpline", 10).found) {
+                    auto spline = item;
+                    auto value = spline.definition();
+                    const auto original_flags = value.flags;
+                    interpolate_fit_cubic(value);
+                    if (!value.control_points.empty() || original_flags != value.flags) {
+                        spline.set_definition(value);
+                        write_record(architecture_omit_adjust(spline));
+                        return;
+                    }
+                }
+            }
+            write_record(architecture_omit_adjust(item));
+        }, record);
         if (const auto* path = sequence(record)) {
-            for (const auto& vertex : path->vertices_) write_record(vertex);
-            if (path->seqend_) write_record(*path->seqend_);
+            for (const auto& vertex : path->children_) write_record(architecture_omit_adjust(vertex));
+            if (path->seqend_) write_record(architecture_omit_adjust(*path->seqend_));
         }
     }
     if (!out) throw std::runtime_error("DXF output failed");
 }
+#include "dxf_mesh.inc"
+#include "dxf_explode.inc"
+#include "dxf_modeler_explode.inc"
+#include "dxf_expand_insert.inc"
+#include "layer_state.cpp"
+#include "sheet_set_document.cpp"
+#include "nested_copy_document.cpp"
+#include "semantic_inventory.cpp"
+
 } // namespace libopencad

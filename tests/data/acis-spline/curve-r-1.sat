@@ -1,0 +1,6 @@
+700 0 1 0
+8 acadrust 8 ACIS 7.0 24 Thu Jan 01 00:00:00 2023
+10 1e-006 1e-010
+body $-1 -1 $-1 $-1 $-1 $-1 #
+intcurve-curve $-1 -1 $-1 forward { exactcur full nurbs 1 closed 2 0 1 1 1 0 1 0 1 1 2 1 0.5 0 null_surface null_surface nullbs nullbs I I 0 0 0 F 1 F 0 } I I #
+End-of-ACIS-data

@@ -59,6 +59,7 @@ int main(int argc, char** argv) {
         std::ofstream output(argv[3]);
         output.exceptions(std::ios::failbit | std::ios::badbit);
         output << dxf_version_string(doc.version()) << ' ' << doc.insertion_units() << '\n';
+        for (const auto &name : doc.dimension_header_variables()) output << name << '\n';
         output.close();
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

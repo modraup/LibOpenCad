@@ -1,0 +1,12 @@
+[package]
+name = "libopencad-plot-style-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "libopencad-plot-style-oracle"
+path = "@LIBOPENCAD_PLOT_STYLE_ORACLE_SRC@"
+
+[dependencies]
+acadrust = { path = "@LIBOPENCAD_LOCAL_ACADRUST@", default-features = false }

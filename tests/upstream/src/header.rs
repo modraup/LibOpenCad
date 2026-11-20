@@ -12,7 +12,11 @@ pub fn generate(ascii: &str, binary: &str) -> acadrust::Result<()> {
 
 pub fn verify(drawing: &str, cpp_result: &str) -> acadrust::Result<()> {
     let doc = DxfReader::from_file(drawing)?.read()?;
-    let rust_result = format!("{} {}", doc.version.as_str(), doc.header.insertion_units);
+    let mut rust_result = format!("{} {}", doc.version.as_str(), doc.header.insertion_units);
+    for name in doc.header.dxf_dim_variables.as_ref().unwrap() {
+        rust_result.push('\n');
+        rust_result.push_str(name);
+    }
     assert_eq!(std::fs::read_to_string(cpp_result)?.trim_end(), rust_result);
     println!("{drawing}: C++ and Rust both read {rust_result}");
     Ok(())

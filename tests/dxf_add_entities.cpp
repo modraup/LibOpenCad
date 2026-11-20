@@ -69,7 +69,7 @@ void boundaries() {
     auto duplicate_owner = read(bytes);
     fails(duplicate_owner, [&] { duplicate_owner.add_line({}, {}); });
     bytes = original;
-    replace(bytes, "$HANDSEED\r\n  5\r\n31\r\n", "$HANDSEED\r\n  5\r\nFFFFFFFFFFFFFFFF\r\n");
+    replace(bytes, "$HANDSEED\r\n  5\r\n32\r\n", "$HANDSEED\r\n  5\r\nFFFFFFFFFFFFFFFF\r\n");
     auto exhausted = read(bytes);
     fails(exhausted, [&] { exhausted.add_circle({}, 1); });
     bytes = original;
@@ -98,16 +98,16 @@ void boundaries() {
     read(save(gbk)).for_each<DxfText>([](const auto& t) { check(t.text() == "文字" && t.layer() == "中文", "new GBK text"); });
 }
 void verify(const DxfDocument& doc) {
-    check(doc.next_handle() == 0x39 && doc.duplicate_handles().empty(), "unique handles and seed");
-    check(doc.model_space_entity_handles() == std::vector<std::string>({"33","34","35"}), "model members");
-    check(doc.paper_space_entity_handles() == std::vector<std::string>({"36","37","38"}), "paper members");
+    check(doc.next_handle() == 0x3A && doc.duplicate_handles().empty(), "unique handles and seed");
+    check(doc.model_space_entity_handles() == std::vector<std::string>({"34","35","36"}), "model members");
+    check(doc.paper_space_entity_handles() == std::vector<std::string>({"37","38","39"}), "paper members");
     int layers = 0, entities = 0, lines = 0, circles = 0, texts = 0;
     doc.for_each<DxfLayer>([&](const auto&) { ++layers; });
     check(layers == 2 && doc.get_layer("标注"), "exactly two layers including 0");
     doc.for_each<DxfEntity>([&](const auto& entity) {
         ++entities;
         const auto handle = std::stoull(entity.handle(), nullptr, 16);
-        check(entity.owner_handle() == (handle < 0x36 ? "15" : "18"), "explicit owner");
+        check(entity.owner_handle() == (handle < 0x37 ? "15" : "18"), "explicit owner");
         check(doc.get_record(entity.handle()) == &entity, "entity index");
         check(doc.ownership_chain(entity.handle()).status == OwnershipStatus::Root, "owner chain");
     });
@@ -131,20 +131,20 @@ void verify(const DxfDocument& doc) {
 }
 void fixture(bool binary, const char* path) {
     auto doc = DxfDocument::create(binary, 4);
-    check(doc.add_layer("标注", 2) == 0x31, "layer handle");
-    check(doc.add_linetype({"建筑虚线", "dash gap", {{1,{}},{-0.5,{}}}, 1.5}) == 0x32, "linetype handle");
+    check(doc.add_layer("标注", 2) == 0x32, "layer handle");
+    check(doc.add_linetype({"建筑虚线", "dash gap", {{1,{}},{-0.5,{}}}, 1.5}) == 0x33, "linetype handle");
     for (int n = 0; n < 2; ++n) {
         EntityOptions options;
         options.space = n ? EntitySpace::Paper : EntitySpace::Model;
         options.color = Color::from_rgb(12,34,56); options.linetype = "建筑虚线";
         options.line_weight = LineWeight::from_value(35);
-        check(doc.add_line({1. + 100*n,2,3. + n}, {10. + 100*n,20,6. + n}, options) == std::uint64_t(0x33 + 3*n), "line handle");
+        check(doc.add_line({1. + 100*n,2,3. + n}, {10. + 100*n,20,6. + n}, options) == std::uint64_t(0x34 + 3*n), "line handle");
         options.color = Color::by_block(); options.linetype.clear();
         options.line_weight = LineWeight::default_weight(); options.invisible = n != 0;
-        check(doc.add_circle({-2. + 100*n,4,1. + n}, 3.5+n, options) == std::uint64_t(0x34 + 3*n), "circle handle");
+        check(doc.add_circle({-2. + 100*n,4,1. + n}, 3.5+n, options) == std::uint64_t(0x35 + 3*n), "circle handle");
         options.layer = "标注"; options.color = Color::from_index(4);
         options.line_weight = LineWeight::by_layer(); options.invisible = false;
-        check(doc.add_text(n ? "图纸：说明" : "模型：尺寸 ^J", {3. + 100*n,5,7. + n}, 2.5+n, options) == std::uint64_t(0x35 + 3*n), "text handle");
+        check(doc.add_text(n ? "图纸：说明" : "模型：尺寸 ^J", {3. + 100*n,5,7. + n}, 2.5+n, options) == std::uint64_t(0x36 + 3*n), "text handle");
     }
     verify(doc);
     verify(read(save(doc)));
