@@ -117,7 +117,10 @@ std::vector<AcdsSegment> read_segments(std::string_view b) {
             continue;
         }
         auto length = std::min<std::uint64_t>(*size, b.size() - seg);
-        if (b.substr(seg, 8) == page_marker) {
+        if (b.substr(seg, 8) == page_marker && *size == 48) {
+            // Some legacy pages declare only the fixed segment header. Only
+            // that representation uses the payload size to locate the next page.
+            // A fully sized segment must not grow into its neighbor on corruption.
             auto payload = word(b, seg + 72, 8);
             if (b.size() - seg >= 80 && payload && *payload <= b.size() - seg - 80)
                 length = std::max<std::uint64_t>(length, 80 + *payload);
@@ -126,6 +129,27 @@ std::vector<AcdsSegment> read_segments(std::string_view b) {
         scan = seg + length;
     }
     return segments;
+}
+template <class Segment>
+std::map<std::uint64_t, std::size_t> page_index(std::string_view b, const std::vector<Segment> &segments) {
+    std::map<std::uint64_t, std::size_t> pages;
+    std::set<std::uint64_t> seen, duplicate;
+    for (auto seg : segments) {
+        if (b.substr(seg.start, 8) != page_marker)
+            continue;
+        auto id = word(b, seg.start + 8), size = word(b, seg.start + 72, 8);
+        if (!id)
+            continue;
+        // A damaged duplicate is still a conflicting declaration of this ID.
+        // Detect it before validating the payload, independent of physical order.
+        if (!seen.insert(*id).second)
+            duplicate.insert(*id);
+        if (word(b, seg.start + 12) == 1 && size && seg.size >= 80 && *size <= seg.size - 80)
+            pages.emplace(*id, seg.start);
+    }
+    for (auto id : duplicate)
+        pages.erase(id);
+    return pages;
 }
 std::optional<std::pair<std::size_t, Bytes>> resolve(std::string_view b, std::string_view region,
                                                      const std::map<std::uint64_t, std::size_t> &pages) {
@@ -141,7 +165,8 @@ std::optional<std::pair<std::size_t, Bytes>> resolve(std::string_view b, std::st
         if (page == pages.end())
             return {};
         auto p = page->second;
-        if (word(b, p + 48, 8) != total || word(b, p + 64) != i || word(b, p + 68) != count ||
+        if (word(b, p + 48, 8) != total || word(b, p + 56, 8) != joined.size() ||
+            word(b, p + 64) != i || word(b, p + 68) != count ||
             word(b, p + 72, 8) != size || p > b.size() || b.size() - p < 80 || *size > b.size() - p - 80 ||
             *size > *total - joined.size())
             return {};
@@ -195,19 +220,7 @@ std::map<std::uint64_t, Bytes> decode_dwg_acds(std::string_view b, const std::se
     std::set<std::size_t> claimed;
     std::vector<std::uint64_t> orphan;
     auto segments = read_segments(b);
-    std::map<std::uint64_t, std::size_t> pages;
-    std::set<std::uint64_t> duplicate_pages;
-    for (auto seg : segments) {
-        if (b.substr(seg.start, 8) != page_marker || word(b, seg.start + 12) != 1)
-            continue;
-        auto id = word(b, seg.start + 8), size = word(b, seg.start + 72, 8);
-        if (!id || !size || seg.size < 80 || *size > seg.size - 80)
-            continue;
-        if (!pages.emplace(*id, seg.start).second)
-            duplicate_pages.insert(*id);
-    }
-    for (auto id : duplicate_pages)
-        pages.erase(id);
+    auto pages = page_index(b, segments);
     bool table = false;
     std::vector<std::pair<std::size_t, std::size_t>> all;
     for (auto segment : segments) {
@@ -379,10 +392,7 @@ std::string replace_dwg_acds_body(std::string_view b, std::uint64_t h, const Byt
         for (std::size_t i = 0; i < n; ++i)
             out.at(p + i) = char(v >> (8 * i));
     };
-    std::map<std::uint64_t, std::size_t> pages;
-    for (auto seg : segments)
-        if (b.substr(seg.start, 8) == page_marker && get(seg.start + 12) == 1)
-            pages.emplace(get(seg.start + 8), seg.start);
+    auto pages = page_index(b, segments);
     std::optional<Segment> selected;
     std::string changed;
     for (auto seg : segments) {

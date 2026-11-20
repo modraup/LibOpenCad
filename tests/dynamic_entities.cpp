@@ -80,6 +80,26 @@ int main(int argc, char **argv) try {
         refused = true;
     }
     check(refused, "Unknown entity rewrite accepted");
+    for (bool mismatch_kind : {false, true}) {
+        auto bad = *d.dynamic_entity(linear);
+        if (mismatch_kind)
+            bad.kind = DynamicBlockKind::LinearParameter;
+        else
+            bad.data = BlockLinearParameter{};
+        for (bool insert : {false, true}) {
+            auto before = bytes(d, binary);
+            refused = false;
+            try {
+                if (insert)
+                    d.insert_dynamic_entity(bad);
+                else
+                    d.update_dynamic_entity(bad);
+            } catch (const std::invalid_argument &) {
+                refused = true;
+            }
+            check(refused && bytes(d, binary) == before, "Invalid DXF entity changed document");
+        }
+    }
     for (bool out_binary : {false, true}) {
         auto saved = bytes(d, out_binary);
         auto reopened = read_bytes(saved);

@@ -337,6 +337,83 @@ static void recovery(DxfVersion v) {
     for (auto parts : {std::vector<std::string>{a, bad}, std::vector<std::string>{bad, a}})
         check(!detail::decode_dwg_acds(catalog(parts), {h}).count(h), "Corrupt duplicate owner accepted");
 }
+static void page_integrity(DxfVersion v) {
+    auto shape = acis::build_box({}, 1, 2, 3);
+    auto box = acis::SabWriter::write(shape);
+    auto sphere = acis::SabWriter::write(acis::build_sphere({}, 7));
+    auto d = parse(create_dwg(v, {}));
+    auto h = d.add_modeler(ModelerKind::Solid3D, shape);
+    auto neighbor = d.add_modeler(ModelerKind::Solid3D, acis::build_sphere({}, 7));
+    auto original = paged(h, box);
+    original.push_back(data_segment(detail::insert_dwg_acds_body({}, neighbor, sphere)));
+    auto verify = [&](const std::vector<std::string> &parts, bool duplicate) {
+        for (bool indexed : {false, true}) {
+            auto section = indexed ? catalog(parts) : legacy(parts);
+            if (duplicate && indexed) {
+                // catalog assigns physical IDs; deliberately repeat the first page ID.
+                const auto first = section.find("\xAC\xD5" "blob01");
+                const auto last = section.rfind("\xAC\xD5" "blob01");
+                put(section, last + 8, get(section, first + 8));
+            }
+            auto decoded = detail::decode_dwg_acds(section, {h, neighbor});
+            check(!decoded.count(h), "Inconsistent or ambiguous AcDs page chain accepted");
+            check(decoded.at(neighbor) == sphere, "Bad page chain changed adjacent model");
+            if (indexed) {
+                bool replacement_refused = false;
+                try {
+                    detail::replace_dwg_acds_body(section, h, box);
+                } catch (const std::invalid_argument &) {
+                    replacement_refused = true;
+                }
+                check(replacement_refused, "Replacement bypassed page-chain validation");
+                auto damaged = attach(d, section);
+                check(damaged.objects().modeler_errors.count(h), "Missing page-chain diagnostic");
+                check(damaged.modeler(neighbor).data.geometry.sab == sphere, "Adjacent geometry lost");
+                auto before = bytes(damaged);
+                check(bytes(parse(before)) == before, "Opaque page-chain save changed");
+                bool refused = false;
+                try {
+                    damaged.set_modeler_geometry(h, shape);
+                } catch (const std::invalid_argument &) {
+                    refused = true;
+                }
+                check(refused && bytes(damaged) == before, "Invalid page edit must reject atomically");
+            }
+        }
+    };
+    // Every framing field must agree with the reference and cumulative payload position.
+    for (auto page : {1u, 2u}) {
+        for (auto field : {48u, 56u, 64u, 68u, 72u}) {
+            auto parts = original;
+            unsigned width = field == 64 || field == 68 ? 4 : 8;
+            put(parts[page], field, get(parts[page], field, width) + 1, width);
+            verify(parts, false);
+        }
+    }
+    for (bool invalid_first : {false, true})
+        for (bool invalid_size : {false, true}) {
+            auto parts = original;
+            parts.push_back(parts[1]);
+            // An invalid duplicate still makes the reference ID ambiguous.
+            auto &bad = invalid_first ? parts[1] : parts.back();
+            if (invalid_size)
+                put(bad, 72, bad.size(), 8);
+            else
+                put(bad, 12, 0);
+            verify(parts, true);
+        }
+    for (bool indexed : {false, true}) {
+        auto good = indexed ? catalog(original) : legacy(original);
+        auto decoded = detail::decode_dwg_acds(good, {h, neighbor});
+        check(decoded.at(h) == box && decoded.at(neighbor) == sphere, "Valid paged geometry changed");
+        if (indexed) {
+            auto updated = detail::replace_dwg_acds_body(good, h, sphere);
+            auto reloaded = detail::decode_dwg_acds(updated, {h, neighbor});
+            check(reloaded.at(h) == sphere && reloaded.at(neighbor) == sphere,
+                  "Valid page promotion changed adjacent model");
+        }
+    }
+}
 int main(int argc, char **argv) try {
     if (argc != 3)
         return 2;
@@ -350,6 +427,8 @@ int main(int argc, char **argv) try {
             duplicate(v);
         else if (mode == "recovery")
             recovery(v);
+        else if (mode == "pages")
+            page_integrity(v);
         else
             return 2;
     }

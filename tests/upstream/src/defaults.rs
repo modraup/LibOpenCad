@@ -2,16 +2,47 @@
 use acadrust::{CadDocument, DxfWriter};
 use std::fmt::Write;
 
+// The native Stage 6 ViewRep port explicitly registers these additional classes.
+// Keep their names, order and flags under the same strict Rust writer comparison
+// as the pinned defaults; do not ignore arbitrary differences in CLASSES.
+fn native_defaults() -> CadDocument {
+    use acadrust::classes::{DxfClass, DxfClassCollection};
+    let mut doc = CadDocument::new();
+    let mut classes = DxfClassCollection::new();
+    for class in doc.classes.iter() {
+        let mut class = class.clone();
+        let after_data_link = class.dxf_name == "DATALINK";
+        class.class_number = 0;
+        classes.add_or_update(class);
+        if after_data_link {
+            for (name, cpp) in [
+                ("ACDBVIEWREPSOURCEMGR", "AcDbViewRepSourceMgr"),
+                ("ACDBVIEWREPSTANDARD", "AcDbViewRepStandard"),
+                ("ACDBVIEWREPORIENTATIONDEF", "AcDbViewRepOrientationDef"),
+                ("ACDBVIEWREPORIENTATION", "AcDbViewRepOrientation"),
+                ("ACDBVIEWREPSECTIONDEFINITION", "AcDbViewRepSectionDefinition"),
+                ("ACDBSYMODELSPACEVIEWSELSET", "AcDbViewRepModelSpaceViewSelSet"),
+                ("ACDBVIEWREPMODELSPACESOURCE", "AcDbViewRepModelSpaceSource"),
+                ("ACDBVIEWREP", "AcDbViewRep"),
+            ] {
+                classes.add_or_update(DxfClass::new(name, cpp));
+            }
+        }
+    }
+    doc.classes = classes;
+    doc
+}
+
 // Freeze the default record values of initialize_defaults + the DXF section writers.
 // C++ compiles this data into the library; generation is a maintainer/test operation.
 pub fn generate(path: &str) -> acadrust::Result<()> {
-    let doc = CadDocument::new();
+    let doc = native_defaults();
     let bytes = DxfWriter::new(&doc).write_to_vec()?;
     let text = String::from_utf8(bytes).unwrap();
     let mut lines = text.lines();
     let mut header_variable = String::new();
     let mut output = String::from(
-        "// SPDX-License-Identifier: MPL-2.0\n// acadrust 52034a673ff59bf6936ebf01ec794b07a97df246, CadDocument::initialize_defaults\n// and io/dxf/writer section defaults. Regenerate with generate-defaults.\nconstexpr struct { int code; const char* value; } default_pairs[] = {\n");
+        "// SPDX-License-Identifier: MPL-2.0\n// acadrust 52034a673ff59bf6936ebf01ec794b07a97df246, CadDocument::initialize_defaults\n// and io/dxf/writer section defaults, plus explicit Stage 6 ViewRep classes.\n// Regenerate with generate-defaults.\nconstexpr struct { int code; const char* value; } default_pairs[] = {\n");
     while let Some(code) = lines.next() {
         let code: u16 = code.trim().parse().unwrap();
         let mut value = lines.next().unwrap().to_string();
@@ -45,7 +76,7 @@ pub fn verify(format: &str, prefix: &str) -> acadrust::Result<()> {
         std::fs::read_to_string(regenerated)?
     );
     let units = if format == "binary" { 1 } else { 4 };
-    let mut defaults = CadDocument::new();
+    let mut defaults = native_defaults();
     defaults.header.insertion_units = units;
     let mut writer = DxfWriter::new(&defaults);
     writer.set_binary(format == "binary");

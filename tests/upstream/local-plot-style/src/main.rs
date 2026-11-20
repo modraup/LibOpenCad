@@ -5,8 +5,39 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+fn verify_flags(prefix: &str) {
+    use acadrust::{DxfReader, DxfVersion, EntityType};
+    let verify = |suffix: &str, expected: u8, version: DxfVersion| {
+        let doc = DxfReader::from_file(format!("{prefix}{suffix}.dxf"))
+            .unwrap()
+            .read()
+            .unwrap();
+        assert_eq!(doc.version, version);
+        assert_eq!(doc.entities().count(), 1);
+        let entity = doc.entities().next().unwrap();
+        assert!(matches!(entity, EntityType::Line(_)));
+        assert_eq!(entity.common().plotstyle_flags, expected);
+        assert_eq!(entity.common().plotstyle_handle, None);
+    };
+    for (name, flag) in [("byblock", 1), ("named", 2)] {
+        for format in ["ascii", "binary"] {
+            for roundtrip in ["", "-roundtrip"] {
+                verify(&format!("-{name}-{format}{roundtrip}"), flag, DxfVersion::AC1032);
+            }
+        }
+    }
+    for roundtrip in ["", "-roundtrip"] {
+        verify(&format!("-ascii-ac1015{roundtrip}"), 1, DxfVersion::AC1015);
+    }
+}
+
 fn main() {
-    let prefix = env::args().nth(1).expect("output prefix");
+    let mut args = env::args().skip(1);
+    let prefix = args.next().expect("output prefix or flags mode");
+    if prefix == "flags" {
+        verify_flags(&args.next().expect("flags output prefix"));
+        return;
+    }
     let scaled = PlotStyleTable::from_bytes(
         "scaled.ctb",
         &fs::read(Path::new(&format!("{prefix}-scaled.ctb"))).unwrap(),

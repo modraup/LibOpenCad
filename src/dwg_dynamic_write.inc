@@ -189,6 +189,10 @@ std::size_t entity_prefix(DwgBitWriter &main, DwgBitWriter &refs, unsigned v, in
 }
 std::string encode_dynamic_record(unsigned v, const char *page, int type, const DwgDynamicRecord &rec) {
     require(rec.kind != DynamicBlockKind::Unknown, "Unknown dynamic object");
+    require(dynamic_block_kind_from_name(rec.dxf_name) == rec.kind, "Dynamic object name/kind mismatch");
+    require(!rec.entity || is_dynamic_block_entity_name(rec.dxf_name), "Dynamic object/entity mismatch");
+    require(rec.kind != DynamicBlockKind::EmptyEntity || std::holds_alternative<std::monostate>(rec.data),
+            "Empty dynamic entity has a payload");
     DynamicWriter w;
     w.v = v;
     w.page = page;
@@ -507,6 +511,11 @@ std::string detail::edit_dwg_dynamic_record(std::string_view file, const DwgR200
     auto v = unsigned(dxf_version_from_string(file.substr(0, 6)));
     require(o.dynamic_records.count(h), "Missing dynamic object");
     require(o.records.count(h), "Missing dynamic record");
+    const auto &original = o.dynamic_records.at(h);
+    require(rec.handle == h && rec.dxf_name == original.dxf_name && rec.kind == original.kind &&
+                rec.entity == original.entity &&
+                (rec.cpp_name.empty() || rec.cpp_name == original.cpp_name),
+            "Dynamic record identity/type mismatch");
     auto type = o.records.at(h).type;
     LifecycleEdits edits;
     edits[h] = encode_dynamic_record(v, drawing_code_page(file, v), type, rec);

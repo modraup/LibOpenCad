@@ -114,7 +114,7 @@ if(BUILD_TESTING)
     endforeach()
     add_executable(dwg_acds_integrity_test tests/dwg_acds_integrity.cpp)
     target_link_libraries(dwg_acds_integrity_test PRIVATE libopencad)
-    foreach(case IN ITEMS nested wide duplicate recovery)
+    foreach(case IN ITEMS nested wide duplicate recovery pages)
         add_test(NAME dwg_acds_integrity_${case} COMMAND dwg_acds_integrity_test
             "${case}" "${CMAKE_CURRENT_SOURCE_DIR}")
     endforeach()
@@ -704,7 +704,7 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_BINARY_DIR}/local-plot-style/Cargo.toml" @ONLY)
         add_test(NAME upstream_plot_style_flags COMMAND cargo run
             --manifest-path "${CMAKE_CURRENT_BINARY_DIR}/local-plot-style/Cargo.toml"
-            --target-dir "${CMAKE_CURRENT_BINARY_DIR}/cargo-plot-style" -- "${plot_style_flags_output}")
+            --target-dir "${CMAKE_CURRENT_BINARY_DIR}/cargo-plot-style" -- flags "${plot_style_flags_output}")
         set_tests_properties(upstream_plot_style_flags PROPERTIES FIXTURES_REQUIRED plot_style_flags)
     endif()
     add_executable(dxf_mtext_test tests/dxf_mtext.cpp)

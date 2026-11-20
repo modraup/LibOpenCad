@@ -142,6 +142,21 @@ int main(int argc, char **argv) try {
         unknown_refused = true;
     }
     check(unknown_refused, "Unknown rewrite accepted");
+    auto bad = *d.dynamic_object(*linear);
+    bad.kind = DynamicBlockKind::EmptyEntity;
+    for (bool insert : {false, true}) {
+        auto before_bad = bytes(d, d.is_binary());
+        bool refused = false;
+        try {
+            if (insert)
+                d.insert_dynamic_object(bad);
+            else
+                d.update_dynamic_object(bad);
+        } catch (const std::invalid_argument &) {
+            refused = true;
+        }
+        check(refused && bytes(d, d.is_binary()) == before_bad, "Invalid DXF object changed document");
+    }
     check(d.dynamic_object(*linear) &&
               std::get<BlockLinearParameter>(d.dynamic_object(*linear)->data).distance_name == "NativeLinear",
           "Unknown rewrite mutated document");

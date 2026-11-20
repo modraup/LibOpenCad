@@ -852,6 +852,12 @@ DynamicBlockObject parse_dynamic_object(const DxfRecord &record, std::uint64_t h
     return object;
 }
 std::vector<DxfRawField> encode_dynamic_fields(const DynamicBlockObject &object) {
+    if (object.kind == DynamicBlockKind::Unknown ||
+        dynamic_block_kind_from_name(object.dxf_name) != object.kind)
+        throw std::invalid_argument("Dynamic object name/kind mismatch");
+    if (object.kind == DynamicBlockKind::EmptyEntity &&
+        !std::holds_alternative<std::monostate>(object.data))
+        throw std::invalid_argument("Empty dynamic entity has a payload");
     DynamicWriter w;
     const bool entity = object.is_entity || is_dynamic_block_entity_name(object.dxf_name);
     w.text(0, object.dxf_name);

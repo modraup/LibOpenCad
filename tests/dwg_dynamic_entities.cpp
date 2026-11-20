@@ -71,6 +71,28 @@ int main(int argc, char **argv) try {
         refused = true;
     }
     check(refused, "Unknown DWG entity rewrite accepted");
+    for (int mutation = 0; mutation < 4; ++mutation) {
+        auto bad = empty;
+        if (mutation == 0)
+            bad.kind = DynamicBlockKind::LinearParameter;
+        if (mutation == 1)
+            bad.data = BlockLinearParameter{};
+        if (mutation == 2)
+            bad.dxf_name = "BLOCKLINEARPARAMETER";
+        if (mutation == 3) {
+            bad.dxf_name = "BLOCKLINEARPARAMETER";
+            bad.kind = DynamicBlockKind::LinearParameter;
+            bad.data = BlockLinearParameter{};
+        }
+        auto before = bytes(d);
+        refused = false;
+        try {
+            d.insert_dynamic_record(bad);
+        } catch (const std::invalid_argument &) {
+            refused = true;
+        }
+        check(refused && bytes(d) == before, "Invalid dynamic insertion must reject atomically");
+    }
     auto saved = bytes(d);
     auto reopened = parse(saved);
     check(reopened.dynamic_record(linear).kind == DynamicBlockKind::EmptyEntity, "Empty DWG roundtrip");

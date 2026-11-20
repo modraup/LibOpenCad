@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // acadrust 52034a673ff59bf6936ebf01ec794b07a97df246, CadDocument::initialize_defaults
-// and io/dxf/writer section defaults. Regenerate with generate-defaults.
+// and io/dxf/writer section defaults, plus explicit Stage 6 ViewRep classes.
+// Regenerate with generate-defaults.
 constexpr struct { int code; const char* value; } default_pairs[] = {
     {0, "SECTION"},
     {2, "HEADER"},

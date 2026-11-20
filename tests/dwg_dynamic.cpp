@@ -131,13 +131,39 @@ int main(int argc, char **argv) try {
           "Updated linear name");
     check(again.dynamic_block_properties(def).size() == 20, "Edited properties");
     save(again, std::string(argv[2]) + ".edited.dwg");
-    auto reject = again;
-    linear.kind = DynamicBlockKind::EmptyEntity;
-    try {
-        reject.update_dynamic_record(linear);
-        throw std::runtime_error("Empty entity rewrite accepted");
-    } catch (const std::invalid_argument &) {
-        check(bytes(reject) == bytes(again), "Rejected rewrite is atomic");
+    for (int mutation = 0; mutation < 7; ++mutation) {
+        auto bad = again.dynamic_record(linear.handle);
+        if (mutation == 0)
+            bad.kind = DynamicBlockKind::EmptyEntity;
+        if (mutation == 1)
+            bad.dxf_name = "BLOCKALIGNMENTPARAMETER";
+        if (mutation == 2) {
+            bad.dxf_name = "BLOCKALIGNMENTPARAMETER";
+            bad.kind = DynamicBlockKind::AlignmentParameter;
+            bad.data = BlockAlignmentParameter{};
+        }
+        if (mutation == 3)
+            bad.entity = true;
+        if (mutation == 4)
+            bad.cpp_name = "AcDbEntity";
+        if (mutation == 5)
+            bad.data = std::monostate{};
+        if (mutation == 6)
+            bad.kind = DynamicBlockKind::Unknown;
+        for (bool insert : {false, true}) {
+            auto reject = again;
+            bool refused = false;
+            try {
+                if (insert)
+                    reject.insert_dynamic_record(bad);
+                else
+                    reject.update_dynamic_record(bad);
+            } catch (const std::invalid_argument &) {
+                refused = true;
+            }
+            check(refused, "Inconsistent dynamic identity/payload accepted");
+            check(bytes(reject) == bytes(again), "Rejected rewrite is atomic");
+        }
     }
     return 0;
 } catch (const std::exception &e) {
