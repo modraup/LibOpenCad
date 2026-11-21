@@ -23,7 +23,7 @@ void DwgDocument::update_associative_object(const AssociativeObject &object) {
         throw std::invalid_argument("Associative object name mismatch");
     if (current->handle != object.handle)
         throw std::invalid_argument("Associative object handle mismatch");
-    *this = DwgDocument(detail::edit_dwg_associative_records(bytes_, objects_, {object}));
+    *this = DwgDocument(detail::edit_dwg_associative_records(source_bytes(), objects_, {object}));
 }
 std::vector<std::uint64_t> DwgDocument::associative_references(std::uint64_t handle) const {
     auto object = associative_object(handle);
@@ -51,7 +51,7 @@ void DwgDocument::remap_associative_handles(const std::unordered_map<std::uint64
     }
     if (objects.empty())
         return;
-    *this = DwgDocument(detail::edit_dwg_associative_records(bytes_, objects_, objects));
+    *this = DwgDocument(detail::edit_dwg_associative_records(source_bytes(), objects_, objects));
 }
 std::vector<std::uint64_t> DwgDocument::associative_owned_network(std::uint64_t network) const {
     std::vector<std::uint64_t> owned;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 std::uint64_t DwgDocument::ensure_civil() {
-    *this = DwgDocument(detail::ensure_dwg_civil(bytes_, objects_));
+    *this = DwgDocument(detail::ensure_dwg_civil(source_bytes(), objects_));
     for (auto &[h, obj] : objects_.arch_objects)
         if (obj.dxf_name == "AECC_TREE_NODE")
             return h;
@@ -18,35 +18,35 @@ std::uint64_t DwgDocument::add_cogo_point(std::optional<std::uint32_t> number, V
                                          std::optional<std::string> description, std::optional<std::uint64_t> style,
                                          std::optional<std::string> layer) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_cogo_point(bytes_, objects_, number, position, description, style, layer, id));
+    *this = DwgDocument(detail::add_dwg_cogo_point(source_bytes(), objects_, number, position, description, style, layer, id));
     return id;
 }
 void DwgDocument::set_cogo_point(std::uint64_t point, std::uint32_t number, Vector3 position,
                                 std::optional<std::string> description) {
-    *this = DwgDocument(detail::set_dwg_cogo_point(bytes_, objects_, point, number, position, description));
+    *this = DwgDocument(detail::set_dwg_cogo_point(source_bytes(), objects_, point, number, position, description));
 }
 void DwgDocument::remove_cogo_point(std::uint64_t point) {
-    *this = DwgDocument(detail::remove_dwg_cogo_point(bytes_, objects_, point));
+    *this = DwgDocument(detail::remove_dwg_cogo_point(source_bytes(), objects_, point));
 }
 std::uint64_t DwgDocument::add_point_group(std::string_view name, std::optional<std::string> description,
                                           const std::vector<std::uint32_t> &numbers) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_point_group(bytes_, objects_, name, description, numbers, id));
+    *this = DwgDocument(detail::add_dwg_point_group(source_bytes(), objects_, name, description, numbers, id));
     return id;
 }
 void DwgDocument::set_point_group(std::uint64_t group, std::string_view name, std::optional<std::string> description,
                                  const std::vector<std::uint32_t> &numbers) {
-    *this = DwgDocument(detail::set_dwg_point_group(bytes_, objects_, group, name, description, numbers));
+    *this = DwgDocument(detail::set_dwg_point_group(source_bytes(), objects_, group, name, description, numbers));
 }
 std::uint64_t DwgDocument::add_point_group_query(std::string_view name, std::optional<std::string> description,
                                                 const PointQuery &query) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_point_group_query(bytes_, objects_, name, description, query, id));
+    *this = DwgDocument(detail::add_dwg_point_group_query(source_bytes(), objects_, name, description, query, id));
     return id;
 }
 void DwgDocument::set_point_group_query(std::uint64_t group, std::string_view name,
                                        std::optional<std::string> description, const PointQuery &query) {
-    *this = DwgDocument(detail::set_dwg_point_group_query(bytes_, objects_, group, name, description, query));
+    *this = DwgDocument(detail::set_dwg_point_group_query(source_bytes(), objects_, group, name, description, query));
 }
 std::vector<std::uint32_t> DwgDocument::point_group_numbers(std::uint64_t group) const {
     auto obj = architecture_object(group);
@@ -59,14 +59,14 @@ std::optional<std::uint32_t> DwgDocument::cogo_point_number(std::uint64_t point)
 std::uint64_t DwgDocument::add_alignment(std::string_view name, const std::vector<Vector2> &vertices,
                                         std::optional<std::string> layer) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_alignment(bytes_, objects_, name, vertices, layer, id));
+    *this = DwgDocument(detail::add_dwg_alignment(source_bytes(), objects_, name, vertices, layer, id));
     return id;
 }
 std::uint64_t DwgDocument::add_alignment_with_curves(std::string_view name, const std::vector<Vector2> &vertices,
                                                     const std::vector<VertexCurve> &curves,
                                                     std::optional<std::string> layer) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_alignment_with_curves(bytes_, objects_, name, vertices, curves, layer, id));
+    *this = DwgDocument(detail::add_dwg_alignment_with_curves(source_bytes(), objects_, name, vertices, curves, layer, id));
     return id;
 }
 std::optional<std::string> DwgDocument::alignment_name(std::uint64_t handle) const {
@@ -92,7 +92,7 @@ std::vector<std::pair<AlignmentPiece, std::vector<Vector2>>> DwgDocument::alignm
 std::uint64_t DwgDocument::add_profile(std::uint64_t alignment, std::string_view name, const std::vector<Vector2> &pvis,
                                       const std::vector<double> &curves, std::optional<std::string> layer) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_profile(bytes_, objects_, alignment, name, pvis, curves, layer, id));
+    *this = DwgDocument(detail::add_dwg_profile(source_bytes(), objects_, alignment, name, pvis, curves, layer, id));
     return id;
 }
 std::uint64_t DwgDocument::add_profile_with_curves(std::uint64_t alignment, std::string_view name,
@@ -100,7 +100,7 @@ std::uint64_t DwgDocument::add_profile_with_curves(std::uint64_t alignment, std:
                                                   const std::vector<VerticalCurve> &curves,
                                                   std::optional<std::string> layer) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_profile_with_curves(bytes_, objects_, alignment, name, pvis, curves, layer, id));
+    *this = DwgDocument(detail::add_dwg_profile_with_curves(source_bytes(), objects_, alignment, name, pvis, curves, layer, id));
     return id;
 }
 std::optional<std::string> DwgDocument::profile_name(std::uint64_t handle) const {
@@ -115,7 +115,7 @@ std::vector<std::pair<ProfilePiece, std::vector<Vector2>>> DwgDocument::profile_
 std::uint64_t DwgDocument::add_tin_surface(std::string_view name, const std::vector<Vector3> &points,
                                           std::optional<std::string> layer) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_tin_surface(bytes_, objects_, name, points, layer, id));
+    *this = DwgDocument(detail::add_dwg_tin_surface(source_bytes(), objects_, name, points, layer, id));
     return id;
 }
 std::optional<TinSurface> DwgDocument::tin_surface(std::uint64_t handle) const {

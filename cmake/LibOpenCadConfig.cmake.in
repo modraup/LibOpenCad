@@ -1,10 +1,8 @@
 @PACKAGE_INIT@
-include(CMakeFindDependencyMacro)
-find_dependency(Iconv)
-find_dependency(ZLIB)
-include("${CMAKE_CURRENT_LIST_DIR}/LibOpenCadTargets.cmake")
-if(TARGET LibOpenCad::libopencad)
-    set_property(TARGET LibOpenCad::libopencad APPEND PROPERTY
-        INTERFACE_LINK_LIBRARIES Iconv::Iconv ZLIB::ZLIB)
+if(@libopencad_needs_link_dependencies@)
+    include(CMakeFindDependencyMacro)
+    find_dependency(Iconv)
+    find_dependency(ZLIB)
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/LibOpenCadTargets.cmake")
 check_required_components(LibOpenCad)

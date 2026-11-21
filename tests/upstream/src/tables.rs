@@ -1,8 +1,30 @@
 // SPDX-License-Identifier: MPL-2.0
 use acadrust::entities::table::*;
-use acadrust::objects::{ObjectType, TableStyle};
+use acadrust::objects::{ObjectType, TableStyle, XRecordValue};
 use acadrust::types::{Color, Handle, LineWeight};
 use acadrust::{CadDocument, DxfReader, DxfWriter, EntityType, Vector3};
+
+pub(crate) fn take_table_recompose(drawing: &mut CadDocument) -> Vec<Handle> {
+    let handle = drawing
+        .named_objects_dictionary_mut()
+        .unwrap()
+        .remove("ACDB_RECOMPOSE_DATA")
+        .expect("table recompose entry");
+    let Some(ObjectType::XRecord(record)) = drawing.objects.remove(&handle) else {
+        panic!("table recompose XRECORD missing");
+    };
+    assert_eq!(record.owner, drawing.header.named_objects_dict_handle);
+    assert_eq!(record.entries[0].code, 90);
+    assert_eq!(record.entries[0].value, XRecordValue::Int32(1));
+    record.entries[1..]
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry.code, 330);
+            entry.value.as_handle().unwrap()
+        })
+        .collect()
+}
+
 fn style() -> TableStyle {
     let mut s = TableStyle::new("中文表格");
     s.description = "明细样式".into();
@@ -198,10 +220,10 @@ pub fn verify(input: &str, prefix: &str) -> acadrust::Result<()> {
             table(expected_doc.entities_in_block(space).next().unwrap()),
         );
     }
-    let styled = read("styled")?;
+    let mut styled = read("styled")?;
     assert_eq!(get_style(&styled).data_row_style.text_height, 8.);
     assert_eq!(get_style(&styled).data_row_style.text_color, Color::ByLayer);
-    let raw_copied = read("raw-copied")?;
+    let mut raw_copied = read("raw-copied")?;
     let raw_source = styled.entities_in_block("*Model_Space").next().unwrap();
     let raw_copy = raw_copied
         .entities()
@@ -226,9 +248,15 @@ pub fn verify(input: &str, prefix: &str) -> acadrust::Result<()> {
         .value
         .as_handle()
         .unwrap();
+    let copy_handle = raw_copy.common().handle;
     assert_ne!(source_content, copied_content);
-    let raw_deleted = read("raw-deleted")?;
+    assert!(take_table_recompose(&mut raw_copied).contains(&copy_handle));
+    let mut raw_deleted = read("raw-deleted")?;
     assert!(!raw_deleted.objects.contains_key(&copied_content));
+    assert_eq!(
+        take_table_recompose(&mut raw_deleted),
+        take_table_recompose(&mut styled)
+    );
     assert_eq!(raw_deleted.objects, styled.objects);
     let before = read("before")?;
     let copied = read("copied")?;

@@ -157,6 +157,14 @@ pub fn verify(input: &str, prefix: &str) -> acadrust::Result<()> {
         fields >= 5 && blocks >= 5 && geometries >= 5,
         "Missing reference/geometry fixture coverage"
     );
+    let mut expected_targets: Vec<_> = source
+        .entities()
+        .map(|entity| entity.common().handle)
+        .filter(|handle| source.xrecord(*handle, "ACAD_XREC_ROUNDTRIP").is_some())
+        .collect();
+    expected_targets.sort();
+    let mut expected_header = source.header.clone();
+    expected_header.handle_seed += 1;
     for step in 0..16 {
         eprintln!("table step {step}");
         let t = crate::entity_transform::operation(if step == 14 {
@@ -204,12 +212,15 @@ pub fn verify(input: &str, prefix: &str) -> acadrust::Result<()> {
         let path = format!("{prefix}.{step}.rust.dxf");
         DxfWriter::new(&expected).write_to_file(&path)?;
         let expected = DxfReader::from_file(path)?.read()?;
-        let actual = DxfReader::from_file(format!("{prefix}.{step}.dxf"))?.read()?;
+        let mut actual = DxfReader::from_file(format!("{prefix}.{step}.dxf"))?.read()?;
         assert_eq!(actual.entities().count(), 15);
         for b in expected.entities() {
             crate::entity_transform::compare(actual.get_entity(b.common().handle).unwrap(), b);
         }
-        assert_eq!(source.header, actual.header);
+        assert_eq!(actual.header, expected_header);
+        let mut targets = crate::tables::take_table_recompose(&mut actual);
+        targets.sort();
+        assert_eq!(targets, expected_targets);
         assert_eq!(source.layers, actual.layers);
         assert_eq!(source.block_records, actual.block_records);
         assert_eq!(actual.objects.len(), source.objects.len());

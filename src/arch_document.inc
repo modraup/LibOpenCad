@@ -45,55 +45,55 @@ std::optional<ArchObject> DwgDocument::architecture_object(std::uint64_t handle)
     return i->second;
 }
 void DwgDocument::set_wall(std::uint64_t handle, Vector3 start, Vector3 end, double width, double height) {
-    *this = DwgDocument(detail::set_dwg_wall(bytes_, objects_, handle, start, end, width, height));
+    *this = DwgDocument(detail::set_dwg_wall(source_bytes(), objects_, handle, start, end, width, height));
 }
 void DwgDocument::set_door(std::uint64_t handle, double width, double height) {
-    *this = DwgDocument(detail::set_dwg_door(bytes_, objects_, handle, width, height));
+    *this = DwgDocument(detail::set_dwg_door(source_bytes(), objects_, handle, width, height));
 }
 void DwgDocument::set_window(std::uint64_t handle, double width, double height) {
-    *this = DwgDocument(detail::set_dwg_window(bytes_, objects_, handle, width, height));
+    *this = DwgDocument(detail::set_dwg_window(source_bytes(), objects_, handle, width, height));
 }
 void DwgDocument::set_opening(std::uint64_t handle, double width, double height) {
-    *this = DwgDocument(detail::set_dwg_opening(bytes_, objects_, handle, width, height));
+    *this = DwgDocument(detail::set_dwg_opening(source_bytes(), objects_, handle, width, height));
 }
 void DwgDocument::set_stair(std::uint64_t handle, double run, double width, double height) {
-    *this = DwgDocument(detail::set_dwg_stair(bytes_, objects_, handle, run, width, height));
+    *this = DwgDocument(detail::set_dwg_stair(source_bytes(), objects_, handle, run, width, height));
 }
 void DwgDocument::set_member(std::uint64_t handle, double length, double breadth, double depth) {
-    *this = DwgDocument(detail::set_dwg_member(bytes_, objects_, handle, length, breadth, depth));
+    *this = DwgDocument(detail::set_dwg_member(source_bytes(), objects_, handle, length, breadth, depth));
 }
 void DwgDocument::set_window_assembly(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::WindowAssembly, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::WindowAssembly, min, max));
 }
 void DwgDocument::set_railing(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::Railing, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::Railing, min, max));
 }
 void DwgDocument::set_slab(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::Slab, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::Slab, min, max));
 }
 void DwgDocument::set_roof(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::Roof, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::Roof, min, max));
 }
 void DwgDocument::set_roof_slab(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::RoofSlab, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::RoofSlab, min, max));
 }
 void DwgDocument::set_space(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::Space, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::Space, min, max));
 }
 void DwgDocument::set_curtain_wall(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::CurtainWall, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::CurtainWall, min, max));
 }
 void DwgDocument::set_column_grid(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::ColumnGrid, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::ColumnGrid, min, max));
 }
 void DwgDocument::set_mass_element(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::MassElement, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::MassElement, min, max));
 }
 void DwgDocument::set_display_theme(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::DisplayTheme, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::DisplayTheme, min, max));
 }
 void DwgDocument::set_ceiling_grid(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_arch_bounds(bytes_, objects_, handle, ArchKind::CeilingGrid, min, max));
+    *this = DwgDocument(detail::set_dwg_arch_bounds(source_bytes(), objects_, handle, ArchKind::CeilingGrid, min, max));
 }
 std::vector<std::uint64_t> DwgDocument::entities_anchored_to(std::uint64_t host) const {
     std::vector<std::uint64_t> anchored;
@@ -157,21 +157,21 @@ std::vector<std::uint64_t> DwgDocument::entities_anchored_to(std::uint64_t host)
 std::uint64_t DwgDocument::add_wall(Vector3 start, Vector3 end, double width, double height,
                                     std::optional<std::string> layer) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_wall(bytes_, objects_, start, end, width, height, layer, id));
+    *this = DwgDocument(detail::add_dwg_wall(source_bytes(), objects_, start, end, width, height, layer, id));
     return id;
 }
 void DwgDocument::translate_architecture(std::uint64_t handle, Vector3 delta) {
-    *this = DwgDocument(detail::translate_dwg_architecture(bytes_, objects_, handle, delta));
+    *this = DwgDocument(detail::translate_dwg_architecture(source_bytes(), objects_, handle, delta));
 }
 void DwgDocument::set_profile_bounds(std::uint64_t handle, Vector3 min, Vector3 max) {
-    *this = DwgDocument(detail::set_dwg_profile_bounds(bytes_, objects_, handle, min, max));
+    *this = DwgDocument(detail::set_dwg_profile_bounds(source_bytes(), objects_, handle, min, max));
 }
 void DwgDocument::reshape_rectangle(std::uint64_t handle, Vector3 start, Vector3 end, double width) {
-    *this = DwgDocument(detail::reshape_dwg_rectangle(bytes_, objects_, handle, start, end, width));
+    *this = DwgDocument(detail::reshape_dwg_rectangle(source_bytes(), objects_, handle, start, end, width));
 }
 void DwgDocument::set_continuous_wall(const ContinuousWall &chain, const std::vector<Vector3> &points, double width,
                                       double height) {
-    *this = DwgDocument(detail::set_dwg_continuous_wall(bytes_, objects_, chain, points, width, height));
+    *this = DwgDocument(detail::set_dwg_continuous_wall(source_bytes(), objects_, chain, points, width, height));
 }
 namespace {
 bool continuous_near(double a, double b) { return std::abs(a - b) <= 1e-6; }

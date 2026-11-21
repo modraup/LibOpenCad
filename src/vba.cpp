@@ -126,10 +126,8 @@ std::optional<std::vector<std::uint8_t>> decompress_chunk(const std::uint8_t *da
             offset += 2;
             auto current = output.size();
             int offset_bits = 4;
-            if (current > 16) {
-                unsigned v = static_cast<unsigned>(current - 1);
-                offset_bits = 32 - __builtin_clz(v);
-            }
+            while ((std::size_t{1} << offset_bits) < current)
+                ++offset_bits;
             auto length_mask = 0xFFFFu >> offset_bits;
             auto length = (*token & length_mask) + 3;
             auto distance = (*token >> (16 - offset_bits)) + 1;

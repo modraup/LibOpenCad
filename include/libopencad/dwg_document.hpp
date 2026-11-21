@@ -1,18 +1,37 @@
 // SPDX-License-Identifier: MPL-2.0
 #pragma once
+#include <filesystem>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <libopencad/arch.hpp>
 #include <libopencad/civil.hpp>
 #include <libopencad/dwg_r2000.hpp>
+#include <libopencad/dwg_read.hpp>
 #include <libopencad/dxf_document.hpp>
 #include <libopencad/preview.hpp>
 namespace libopencad {
+namespace detail {
+class DwgMappedFile;
+}
+struct DwgReadOutcome;
+struct DwgRecoverOutcome;
 // Same-version edits to an existing drawing. Geometry uses the same entity
 // types and units as DxfDocument. Keep original bytes for opaque objects.
 class DwgDocument {
   public:
     static DwgDocument read(std::istream &input);
+    static DwgDocument read(std::istream &input, const DwgReadOptions &options);
+    // Collect source and output counts. Failsafe reads can return a partial document.
+    // Call recover() to repair the container and unambiguous drawing references.
+    static DwgReadOutcome read_with_stats(std::istream &input, const DwgReadOptions &options = {});
+    // Read through a read-only file mapping and return the same statistics as read_with_stats.
+    // Keep the source file unchanged while any document still holds the mapping.
+    static DwgReadOutcome from_mmap(const std::filesystem::path &path, const DwgReadOptions &options = {});
+    // Recover at indexed record boundaries and repair unambiguous references.
+    // Throws DwgRecoveryError with diagnostics when no usable drawing can be recovered.
+    static DwgRecoverOutcome recover(std::istream &input);
+    static DwgRecoverOutcome recover(std::istream &input, const DwgReadOptions &options);
     void write(std::ostream &output) const;
     const DwgR2000Objects &objects() const { return objects_; }
     DxfLine line(std::uint64_t handle) const;
@@ -195,6 +214,10 @@ class DwgDocument {
 
   private:
     explicit DwgDocument(std::string bytes);
+    DwgDocument(std::string bytes, DwgR2000Objects objects, bool writable);
+    DwgDocument(std::shared_ptr<const detail::DwgMappedFile> mapping, DwgR2000Objects objects, bool writable);
+    std::string_view source_bytes() const noexcept;
+    void finish_read();
     void initialize(DxfEntity &entity, const char *type, std::uint64_t handle,
                     const DwgR2000EntityProperties &props) const;
     template <class Entity>
@@ -203,6 +226,23 @@ class DwgDocument {
     void apply_common(const DxfEntity &entity, const DxfEntity &before,
                       std::optional<DwgDocument> &staged) const;
     std::string bytes_;
+    std::shared_ptr<const detail::DwgMappedFile> mapped_bytes_;
     DwgR2000Objects objects_;
+    bool writable_ = true;
+};
+
+struct DwgReadOutcome {
+    DwgDocument document;
+    DwgReadStatistics stats;
+    // The original byte stream can be written safely when true.
+    bool writable = true;
+};
+
+struct DwgRecoverOutcome {
+    DwgDocument document;
+    DwgReadStatistics stats;
+    RepairReport repair;
+    // A recovered view is still available when the native writer cannot safely rebuild the file.
+    bool writable = true;
 };
 } // namespace libopencad

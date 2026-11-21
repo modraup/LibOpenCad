@@ -69,8 +69,8 @@ fn graph_map(
     map
 }
 pub fn verify(prefix: &str) -> acadrust::Result<()> {
-    let source = DxfReader::from_file(format!("{prefix}.source.dxf"))?.read()?;
-    let actual = DxfReader::from_file(format!("{prefix}.dxf"))?.read()?;
+    let mut source = DxfReader::from_file(format!("{prefix}.source.dxf"))?.read()?;
+    let mut actual = DxfReader::from_file(format!("{prefix}.dxf"))?.read()?;
     let ids = ids(&format!("{prefix}.parts"));
     let origins = crate::expand_specialized::ids(&format!("{prefix}.origins"));
     let EntityType::Insert(root) = source.get_entity(ids[0]).unwrap() else {
@@ -215,6 +215,22 @@ pub fn verify(prefix: &str) -> acadrust::Result<()> {
             Some(e),
             "Source entity changed"
         );
+    }
+    let expanded_tables: Vec<_> = ids[1..]
+        .iter()
+        .copied()
+        .filter(|handle| {
+            matches!(actual.get_entity(*handle), Some(EntityType::Table(_)))
+                && actual.xrecord(*handle, "ACAD_XREC_ROUNDTRIP").is_some()
+        })
+        .collect();
+    if !expanded_tables.is_empty() {
+        let mut expected_targets = crate::tables::take_table_recompose(&mut source);
+        expected_targets.extend(expanded_tables);
+        expected_targets.sort();
+        let mut actual_targets = crate::tables::take_table_recompose(&mut actual);
+        actual_targets.sort();
+        assert_eq!(actual_targets, expected_targets);
     }
     for (h, o) in &source.objects {
         let mut a = actual.objects[h].clone();

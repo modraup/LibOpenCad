@@ -143,7 +143,12 @@ pub fn verify(input: &str, prefix: &str) -> acadrust::Result<()> {
         .handle;
     let geometry_only = read("geometry-only")?;
     restored(&geometry_only, model);
-    let roundtrip = read("roundtrip")?;
+    let mut roundtrip = read("roundtrip")?;
+    let mut targets = crate::tables::take_table_recompose(&mut roundtrip);
+    targets.sort();
+    let mut expected_targets = [model, paper];
+    expected_targets.sort();
+    assert_eq!(targets, expected_targets);
     assert_eq!(roundtrip.objects, source.objects);
     restored(&roundtrip, model);
     restored(&roundtrip, paper);

@@ -4,6 +4,7 @@
 // acadrust bit_reader/bit_writer, file_header_ac15 and handle_reader.
 #include "dwg_edit_internal.hpp"
 #include "dwg_modeler_internal.hpp"
+#include "dwg_read_internal.hpp"
 #include "dwg_sat_internal.hpp"
 #include "dwg_sections_internal.hpp"
 #include "dxf_code_page.hpp"
@@ -26,6 +27,16 @@ namespace {
 void require(bool condition, const char *reason) {
     if (!condition)
         throw std::invalid_argument(reason);
+}
+void read_diagnostic(DwgReadStatistics &stats, DwgReadDiagnostic diagnostic, bool error = true) {
+    if (error)
+        ++stats.recovered_errors;
+    constexpr std::size_t limit = 1000; // acadrust MAX_READ_DIAGNOSTICS
+    if (stats.diagnostics.size() < limit - 1)
+        stats.diagnostics.push_back(std::move(diagnostic));
+    else if (stats.diagnostics.size() == limit - 1)
+        stats.diagnostics.push_back({"diagnostic-limit-reached", "Additional DWG diagnostics were omitted", {},
+                                     DwgReadStage::RecordStream, {}, {}, {}, {}});
 }
 std::uint16_t crc16(std::string_view data) {
     std::uint16_t crc = 0xc0c1;
@@ -51,14 +62,22 @@ std::uint64_t compact_integer(DwgBitReader &r, bool signed_magnitude, bool &nega
     }
     throw std::invalid_argument("DWG modular integer too long");
 }
-std::map<std::uint64_t, std::size_t> read_offsets(std::string_view map, std::size_t object_size) {
+std::map<std::uint64_t, std::size_t> read_offsets(std::string_view map, std::size_t object_size,
+                                                DwgReadStatistics *stats = nullptr) {
     std::map<std::uint64_t, std::size_t> offsets;
+    const auto length = map.size();
     while (map.size() >= 4) {
         DwgBitReader chunk(map);
         auto size = chunk.bits(16);
         require(size >= 2 && size <= 2048 && size <= map.size() - 2, "Invalid DWG handle chunk size");
         chunk.seek(size * 8);
-        require(chunk.bits(16) == crc16(map.substr(0, size)), "DWG handle map CRC mismatch");
+        if (chunk.bits(16) != crc16(map.substr(0, size))) {
+            if (stats)
+                read_diagnostic(*stats, {"checksum-mismatch", "DWG handle map CRC mismatch", "AcDb:Handles",
+                                         DwgReadStage::Handles, length - map.size() + size,
+                                         DwgOffsetBasis::HandleSectionByte, {}, {}}, false);
+            require(stats && stats->recovery_mode, "DWG handle map CRC mismatch");
+        }
         if (size == 2) {
             require(map.size() == 4, "Trailing DWG handle map bytes");
             return offsets;
@@ -75,8 +94,9 @@ std::map<std::uint64_t, std::size_t> read_offsets(std::string_view map, std::siz
             require(negative ? distance <= offset : distance <= UINT64_MAX - offset,
                     "DWG object offset overflow");
             offset = negative ? offset - distance : offset + distance;
-            require(h && offset < object_size, "Invalid DWG object location");
-            require(offsets.emplace(h, offset).second, "Duplicate DWG object handle");
+            require(stats || (h && offset < object_size), "Invalid DWG object location");
+            const auto location = offset > SIZE_MAX ? SIZE_MAX : static_cast<std::size_t>(offset);
+            require(offsets.emplace(h, location).second, "Duplicate DWG object handle");
         }
         map.remove_prefix(size + 2);
     }
@@ -282,7 +302,8 @@ DwgR2000Index read_dwg_r2000_index(std::string_view file) {
     require(file.substr(0, 6) == "AC1015", "Expected R2000 DWG");
     return read_dwg_linear_index(file);
 }
-DwgR2000Index read_dwg_linear_index(std::string_view file) {
+namespace {
+DwgR2000Index read_linear_directory(std::string_view file) {
     auto sig = file.substr(0, 6);
     require(sig == "AC1012" || sig == "AC1014" || sig == "AC1015", "Expected R13, R14 or R2000 DWG");
     DwgBitReader r(file);
@@ -307,12 +328,17 @@ DwgR2000Index read_dwg_linear_index(std::string_view file) {
                                           0x5e, 0x41, 0xe0, 0x5f, 0x9d, 0x3a, 0x4d, 0};
     for (auto byte : sentinel)
         require(r.bits(8) == byte, "DWG locator sentinel mismatch");
-    require(index.sections.count(2), "Missing DWG handle map");
-    auto section = index.sections.at(2);
-    auto map = file.substr(section.offset, section.size);
-    index.object_offsets = read_offsets(map, file.size());
     return index;
 }
+DwgR2000Index read_linear_index(std::string_view file) {
+    auto index = read_linear_directory(file);
+    require(index.sections.count(2), "Missing DWG handle map");
+    auto section = index.sections.at(2);
+    index.object_offsets = read_offsets(file.substr(section.offset, section.size), file.size());
+    return index;
+}
+} // namespace
+DwgR2000Index read_dwg_linear_index(std::string_view file) { return read_linear_index(file); }
 namespace {
 void skip_entity_prefix(DwgBitReader &main, std::size_t end, bool graphic, unsigned version,
                         std::vector<DwgEedItem> *eed = nullptr,
@@ -587,26 +613,33 @@ void read_geometry(std::string_view body, DwgR2000Record &r, std::uint64_t h, un
         return;
     }
     if (r.type == 19) {
-        auto &line = result.lines[h];
+        DwgR2000Line line;
         line.properties = std::move(props);
         read_endpoints(main, line, early);
         extrusion(line);
+        require(main.position() == main_end && body.size() * 8 - handles.position() < 8,
+                "Unexpected trailing DWG geometry fields");
+        result.lines.emplace(h, std::move(line));
     } else {
-        DwgCircle &circle = r.type == 17 ? static_cast<DwgCircle &>(result.arcs[h]) : result.circles[h];
+        DwgArc arc;
+        DwgCircle &circle = arc;
         circle.properties = std::move(props);
         circle.center = read_vector(main);
         r.geometry_bit = main.position();
         circle.radius = main.bit_double();
         extrusion(circle);
         if (r.type == 17) {
-            auto &arc = result.arcs.at(h);
             arc.start_angle = main.bit_double();
             arc.end_angle = main.bit_double();
         }
+        require(main.position() == main_end && body.size() * 8 - handles.position() < 8,
+                "Unexpected trailing DWG geometry fields");
+        if (r.type == 17)
+            result.arcs.emplace(h, std::move(arc));
+        else
+            result.circles.emplace(h, std::move(circle));
     }
     r.geometry_end = main.position();
-    require(main.position() == main_end && body.size() * 8 - handles.position() < 8,
-            "Unexpected trailing DWG geometry fields");
 }
 } // namespace
 
@@ -713,8 +746,10 @@ DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint6
                 "Invalid DWG block control size");
         for (int i = 0; i < count; i++)
             refs.handle(h);
-        control->model_space = refs.handle(h).value;
-        control->paper_space = refs.handle(h).value;
+        auto model = refs.handle(h).value;
+        auto paper = refs.handle(h).value;
+        control->model_space = model;
+        control->paper_space = paper;
         return symbol;
     }
     DwgBitReader strings(body, r.main_bits);
@@ -808,31 +843,96 @@ DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint6
 #include "dwg_associative.inc"
 #include "dwg_arch_read.inc"
 #include "dwg_class_object.inc"
+std::string recovery_record_type(std::int16_t type, const std::vector<std::string> &classes) {
+    if (type >= 500 && std::size_t(type - 500) < classes.size() && !classes[type - 500].empty())
+        return classes[type - 500];
+    switch (type) {
+    case 1: return "TEXT";
+    case 7: return "INSERT";
+    case 8: return "MINSERT";
+    case 17: return "ARC";
+    case 18: return "CIRCLE";
+    case 19: return "LINE";
+    case 48: return "BLOCK_CONTROL";
+    case 49: return "BLOCK_RECORD";
+    case 51: return "LAYER";
+    case 53: return "STYLE";
+    case 57: return "LTYPE";
+    default: return "DWG_OBJ_" + std::to_string(type);
+    }
+}
 DwgR2000Objects decode_objects(std::string_view file, const DwgR2000Index &index, unsigned version,
-                               const char *page,const std::vector<std::string>& classes={}) {
+                               const char *page, const std::vector<std::string> &classes = {},
+                               DwgReadStatistics *stats = nullptr) {
     std::set<std::size_t> boundaries{file.size()};
+    std::set<std::uint64_t> invalid_locations;
+    const auto failsafe = stats && stats->recovery_mode;
+    const auto offset_basis = version <= 1015 ? DwgOffsetBasis::FileByte : DwgOffsetBasis::ObjectSectionByte;
+    auto skip_record = [&](std::uint64_t handle, std::size_t offset, const char *code,
+                           std::string message, std::string type = {}) {
+        if (!stats)
+            throw std::invalid_argument(message);
+        ++stats->skipped_source_records;
+        std::ostringstream detail;
+        detail << "DWG record at handle 0x" << std::uppercase << std::hex << handle << ": " << message;
+        auto description = detail.str();
+        read_diagnostic(*stats, {code, description, "AcDb:AcDbObjects", DwgReadStage::RecordStream,
+                                 offset, offset_basis, handle, std::move(type)});
+        if (!failsafe)
+            throw DwgReadError(std::move(description), std::move(*stats));
+    };
     for (auto [id, loc] : index.sections)
         if (loc.size)
             boundaries.insert(loc.offset);
     for (auto [handle, offset] : index.object_offsets) {
-        if (version <= 1015)
-            require(offset >= 0x19 + 9 * index.sections.size() + 18, "Object overlaps DWG directory");
+        const char *problem = nullptr;
+        if (!handle || offset >= file.size())
+            problem = "Invalid DWG object location";
+        else if (version <= 1015 && offset < 0x19 + 9 * index.sections.size() + 18)
+            problem = "Object overlaps DWG directory";
         for (auto [id, loc] : index.sections)
-            require(offset < loc.offset || offset - loc.offset >= loc.size, "Object overlaps DWG section");
-        require(boundaries.insert(offset).second, "Duplicate DWG object offset");
+            if (offset >= loc.offset && offset - loc.offset < loc.size)
+                problem = "Object overlaps DWG section";
+        // A shared offset may still identify one intrinsic handle in failsafe mode.
+        if (!problem && !boundaries.insert(offset).second && !failsafe)
+            problem = "Duplicate DWG object offset";
+        if (problem) {
+            invalid_locations.insert(handle);
+            skip_record(handle, offset, "record-catalog-failed", problem);
+        }
     }
     DwgR2000Objects result;
     result.class_names = classes;
     for (auto [handle, offset] : index.object_offsets) {
+        if (invalid_locations.count(handle))
+            continue;
         auto end = *boundaries.upper_bound(offset);
-        auto record = read_record(file.substr(offset, end - offset), offset, handle, version);
+        DwgR2000Record record{};
+        bool have_frame = false;
+        try {
+            record = read_record(file.substr(offset, end - offset), offset, handle, version);
+            have_frame = true;
+            auto body = file.substr(record.body_offset, record.body_size);
+            if (basic_geometry(record.type))
+                read_geometry(body, record, handle, version, result);
+            else if (record.type == 1)
+                read_text_record(body, record, handle, version, page, result);
+            else if (record.type == 48)
+                read_symbol(body, record, handle, version, page, nullptr, &result);
+            else if (named_table(record.type))
+                result.symbols.emplace(handle, read_symbol(body, record, handle, version, page));
+        } catch (const std::invalid_argument &error) {
+            if (!stats)
+                throw;
+            skip_record(handle, offset, have_frame ? "record-decode-failed" : "record-catalog-failed", error.what(),
+                        have_frame ? recovery_record_type(record.type, classes) : std::string{});
+            continue;
+        }
         // Fixed type catalogue from object_reader/common.rs. Codes 500+ are drawing classes.
         const auto type = record.type;
         if (type < 500 && !((type >= 1 && type <= 8) || (type >= 10 && type <= 53) ||
                             (type >= 56 && type <= 57) || (type >= 60 && type <= 82) || type >= 498))
             result.unknown_fixed_types.push_back(handle);
-        if (basic_geometry(record.type))
-            read_geometry(file.substr(record.body_offset, record.body_size), record, handle, version, result);
         if ((record.type >= 37 && record.type <= 39) ||
             (record.type >= 500 && std::size_t(record.type - 500) < classes.size() &&
              is_surface_class(classes[record.type - 500]))) {
@@ -922,15 +1022,6 @@ DwgR2000Objects decode_objects(std::string_view file, const DwgR2000Index &index
                 result.metadata_errors[handle] = e.what();
             }
         }
-        if (record.type == 1)
-            read_text_record(file.substr(record.body_offset, record.body_size), record, handle, version, page,
-                             result);
-        if (record.type == 48)
-            read_symbol(file.substr(record.body_offset, record.body_size), record, handle, version, page,
-                        nullptr, &result);
-        if (named_table(record.type))
-            result.symbols.emplace(handle, read_symbol(file.substr(record.body_offset, record.body_size),
-                                                       record, handle, version, page));
         if (record.type == 49) {
             try {
                 auto body = file.substr(record.body_offset, record.body_size);
@@ -944,6 +1035,8 @@ DwgR2000Objects decode_objects(std::string_view file, const DwgR2000Index &index
             }
         }
         result.records.emplace(handle, record);
+        if (stats)
+            ++stats->decoded_source_records;
     }
     for (auto &[h, m] : result.modelers)
         if (m.properties.mode)
@@ -1246,15 +1339,17 @@ DwgR2000Objects read_dwg_objects(std::string_view file) {
         return read_r12_geometry(file);
     if (version <= 1015)
         return read_dwg_linear_objects(file);
-    auto objects = read_dwg_paged_section(file, "AcDb:AcDbObjects");
-    auto handles = read_dwg_paged_section(file, "AcDb:Handles");
+    detail::DwgPagedReader reader(file);
+    reader.authenticate(std::nullopt);
+    auto objects = reader.read("AcDb:AcDbObjects");
+    auto handles = reader.read("AcDb:Handles");
     DwgR2000Index index;
     index.object_offsets = read_offsets(handles, objects.size());
     std::vector<DwgClassRecord> records;
     std::vector<std::string> classes;
     std::string classes_error;
     try {
-        records = read_class_records(read_dwg_paged_section(file, "AcDb:Classes"), version,
+        records = read_class_records(reader.read("AcDb:Classes"), version,
                                      static_cast<unsigned char>(file[11]), drawing_code_page(file, version));
     } catch (const std::exception &e) {
         classes_error = e.what();
@@ -1265,7 +1360,7 @@ DwgR2000Objects read_dwg_objects(std::string_view file) {
     result.classes = std::move(records);
     result.classes_error = classes_error;
     if (version >= 1027)
-        detail::attach_dwg_modeler_data(file, result);
+        detail::attach_dwg_modeler_data(reader, result);
     return result;
 }
 namespace {
@@ -2593,6 +2688,8 @@ std::string detail::set_dwg_entity_color(std::string_view file, const DwgR2000Ob
 
 #include "dwg_layer.inc"
 #include "dwg_lifecycle.inc"
+#include "dwg_read.inc"
+#include "dwg_recover.inc"
 #include "dwg_text_write.inc"
 std::string create_dwg(DxfVersion version, const std::vector<DwgPrimitive> &entities) {
     auto defaults = standard_drawing(version);

@@ -27,7 +27,7 @@ void read_text_record(std::string_view body, DwgR2000Record &r, std::uint64_t h,
     DwgBitReader main(body, end);
     main.seek(r.handle_end_bit);
     handles.seek(r.main_bits);
-    auto &t = objects.texts[h];
+    DwgText t;
     t.properties = read_entity_properties(main, handles, h, end, v, r);
     r.geometry_start = main.position();
     bool early = v < 1015;
@@ -63,4 +63,5 @@ void read_text_record(std::string_view body, DwgR2000Record &r, std::uint64_t h,
     r.geometry_end = main.position();
     require(main.position() == end && body.size() * 8 - handles.position() < 8,
             "Unexpected trailing DWG TEXT fields");
+    objects.texts.emplace(h, std::move(t));
 }

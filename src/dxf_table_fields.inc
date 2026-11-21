@@ -850,102 +850,152 @@ DxfDocument::build_table_block(std::uint64_t table, const std::vector<TableCellF
 }
 
 void DxfDocument::prepare_table_recompose_data() {
-    std::vector<std::uint64_t> styles;
-    for_each<DxfTableStyle>([&](const auto &style) {
-        auto dict = extension_dictionary_handle(style.handle());
-        if (dict.empty())
-            return;
-        if (!dictionary_entry(dict, kCellStyleMapKey).empty())
-            styles.push_back(handle_value(style.handle()));
-    });
-    std::sort(styles.begin(), styles.end());
-    std::vector<std::uint64_t> targets = styles;
-    for_each<DxfTable>([&](const auto &table) {
-        auto dict = extension_dictionary_handle(table.handle());
-        if (dict.empty())
-            return;
-        if (!dictionary_entry(dict, kRoundtripKey).empty())
-            targets.push_back(handle_value(table.handle()));
-    });
-    auto nod = root_dictionary_handle();
-    auto existing = dictionary_entry(nod, kRecomposeKey);
-    std::vector<std::pair<int, std::string>> wanted{{90, "1"}};
-    for (auto h : targets)
-        wanted.push_back({330, hex_handle(h)});
-    auto payload = [&](const DxfRecord &record) {
-        std::vector<std::pair<int, std::string>> out;
-        bool active = false;
-        for (const auto &p : record.pairs_) {
-            if (p.code == 100 && p.value == "AcDbXrecord")
-                active = true;
-            else if (active && (p.code == 90 || p.code == 330))
-                out.push_back({p.code, p.value});
-        }
-        return out;
-    };
-    if (targets.empty() && existing.empty())
-        return;
-    if (!existing.empty()) {
-        if (targets.empty()) {
-            DxfDocument staged = *this;
-            auto &dict = staged.mutable_object(handle_value(nod));
-            std::optional<std::size_t> key;
-            dict.locate_if("AcDbDictionary", [&](std::size_t i, int code) {
-                if (code == 3 && detail::symbol_name_key(dict.decode_string(dict.pairs_[i].value)) ==
-                                     detail::symbol_name_key(kRecomposeKey)) {
-                    key = i;
-                    return true;
-                }
-                return false;
-            });
-            if (key) {
-                auto handle_at = *key + 1;
-                if (handle_at < dict.pairs_.size() &&
-                    (dict.pairs_[handle_at].code == 350 || dict.pairs_[handle_at].code == 360)) {
-                    auto target = handle_value(dict.pairs_[handle_at].value);
-                    dict.pairs_.erase(dict.pairs_.begin() + static_cast<std::ptrdiff_t>(handle_at));
-                    dict.pairs_.erase(dict.pairs_.begin() + static_cast<std::ptrdiff_t>(*key));
-                    if (target) {
-                        const auto found = staged.handle_index_.find(target);
-                        if (found != staged.handle_index_.end() && found->second.size() == 1 &&
-                            !found->second.front().vertex && !found->second.front().seqend)
-                            staged.records_.erase(staged.records_.begin() +
-                                                  static_cast<std::ptrdiff_t>(found->second.front().record));
-                    }
-                }
-            }
-            staged.rebuild_indexes();
-            *this = std::move(staged);
-            return;
-        }
-        if (payload(*get_record(existing)) == wanted)
-            return;
-        DxfDocument staged = *this;
-        auto &record = staged.mutable_object(handle_value(existing));
-        std::size_t begin = record.pairs_.size();
-        for (std::size_t i = 0; i < record.pairs_.size(); ++i)
-            if (record.pairs_[i].code == 100 && record.pairs_[i].value == "AcDbXrecord") {
-                begin = i + 1;
-                if (begin < record.pairs_.size() && record.pairs_[begin].code == 280)
-                    ++begin;
-                break;
-            }
-        record.pairs_.erase(record.pairs_.begin() + static_cast<std::ptrdiff_t>(begin), record.pairs_.end());
-        for (const auto &item : wanted)
-            record.pairs_.push_back({item.first, item.second});
-        record.set_short_field("AcDbXrecord", 280, 1);
-        staged.rebuild_indexes();
+    DxfDocument staged;
+    if (stage_table_recompose_data(staged))
         *this = std::move(staged);
-        return;
+}
+
+std::vector<DxfRawField> DxfDocument::table_recompose_fields(const DxfRecord &record, std::string_view root) const {
+    if (record.type() != "XRECORD" || handle_value(record.owner_handle()) != handle_value(root))
+        return {};
+    auto fields = record.subclass_fields("AcDbXrecord");
+    // Only edit the known version of this metadata.
+    if (fields.size() < 2 || fields[0].code != 280 || detail::as_i32_bits(fields[0].value, false) != 1u ||
+        fields[1].code != 90 || detail::as_i32_bits(fields[1].value, false) != 1u ||
+        !std::all_of(fields.begin() + 2, fields.end(), [](const DxfRawField &field) {
+            return field.code == 330 && handle_value(field.value) != 0;
+        }))
+        return {};
+    return fields;
+}
+
+void DxfDocument::forget_table_recompose_target(std::uint64_t handle) {
+    try {
+        auto root = root_dictionary_handle();
+        auto entry = dictionary_entry(root, kRecomposeKey);
+        if (entry.empty())
+            return;
+        auto &record = mutable_object(handle_value(entry));
+        auto fields = table_recompose_fields(record, root);
+        if (fields.empty())
+            return;
+        const auto first_removed = std::remove_if(fields.begin() + 2, fields.end(), [&](const DxfRawField &field) {
+            return handle_value(field.value) == handle;
+        });
+        if (first_removed != fields.end()) {
+            fields.erase(first_removed, fields.end());
+            record.set_subclass_fields("AcDbXrecord", fields);
+        }
+    } catch (const std::invalid_argument &) {
+        // Leave malformed references to the normal deletion check.
     }
-    std::vector<SymbolProperty> values;
-    values.push_back({90, "1"});
-    for (auto h : targets)
-        values.push_back({330, hex_handle(h)});
-    DxfDocument staged = *this;
-    auto id = staged.add_xrecord(nod, kRecomposeKey, values);
-    staged.mutable_object(id).set_short_field("AcDbXrecord", 280, 1);
-    *this = std::move(staged);
+}
+
+bool DxfDocument::stage_table_recompose_data(DxfDocument &staged) const {
+    if (version_ == DxfVersion::AC1009)
+        return false;
+
+    std::vector<std::uint64_t> targets, tables;
+    std::string root, existing;
+    const DxfRecord *record = nullptr;
+    std::vector<DxfRawField> current;
+    try {
+        root = root_dictionary_handle();
+        existing = dictionary_entry(root, kRecomposeKey);
+        if (!existing.empty()) {
+            record = get_record(existing);
+            current = table_recompose_fields(*record, root);
+            if (current.empty())
+                return false;
+        }
+        for_each<DxfTableStyle>([&](const auto &style) {
+            auto dictionary = extension_dictionary_handle(style.handle());
+            if (dictionary.empty())
+                return;
+            auto entry = dictionary_entry(dictionary, kCellStyleMapKey);
+            if (!entry.empty() && get_record(entry)->type() == "CELLSTYLEMAP")
+                targets.push_back(handle_value(style.handle()));
+        });
+        for_each<DxfTable>([&](const auto &table) {
+            auto handle = handle_value(table.handle());
+            if (handle && named_xrecord(handle, kRoundtripKey))
+                tables.push_back(handle);
+        });
+    } catch (const std::invalid_argument &) {
+        // A malformed dictionary graph can still be saved verbatim.
+        return false;
+    }
+
+    if (targets.empty() && tables.empty()) {
+        if (!record)
+            return false;
+        const auto &pairs = record->pairs_;
+        bool standard_envelope = pairs.size() == current.size() + 4;
+        if (pairs.size() == current.size() + 7) {
+            const auto preamble_end = pairs.begin() + 4;
+            auto reactor = std::find_if(pairs.begin() + 1, preamble_end, [](const DxfRecord::Pair &pair) {
+                return pair.code == 102 && pair.value == "{ACAD_REACTORS";
+            });
+            standard_envelope = reactor != preamble_end && reactor[1].code == 330 &&
+                                handle_value(reactor[1].value) == handle_value(root) &&
+                                reactor[2].code == 102 && reactor[2].value == "}";
+        }
+        if (!standard_envelope)
+            return false;
+
+        // Keep the object if a second dictionary entry, owner, or application record refers to it.
+        auto id = handle_value(existing);
+        std::size_t references = 0;
+        auto count_references = [&](const DxfRecord &item) {
+            for (const auto &pair : item.pairs_)
+                if ((pointer_code(pair.code) || (pair.code >= 320 && pair.code <= 329)) &&
+                    handle_value(pair.value) == id)
+                    ++references;
+        };
+        for (const auto &item : records_) {
+            std::visit(count_references, item);
+            if (const auto *compound = sequence(item)) {
+                for (const auto &child : compound->children_)
+                    count_references(child);
+                if (compound->seqend_)
+                    count_references(*compound->seqend_);
+            }
+        }
+        if (references != 1)
+            return false;
+
+        staged = *this;
+        staged.erase_dictionary_entry(staged.mutable_object(handle_value(root)), kRecomposeKey);
+        // Refuse to erase an object if the dictionary entry was nonstandard and could not be removed.
+        if (!staged.dictionary_entry(root, kRecomposeKey).empty())
+            return false;
+        auto index = staged.handle_index_.at(id).front().record;
+        staged.records_.erase(staged.records_.begin() + static_cast<std::ptrdiff_t>(index));
+        staged.rebuild_indexes();
+        return true;
+    }
+
+    std::sort(targets.begin(), targets.end());
+    targets.insert(targets.end(), tables.begin(), tables.end());
+    if (current.size() == targets.size() + 2 &&
+        std::equal(targets.begin(), targets.end(), current.begin() + 2,
+                   [](auto handle, const auto &field) { return handle == handle_value(field.value); }))
+        return false;
+
+    std::vector<DxfRawField> wanted{{280, "1"}, {90, "1"}};
+    for (auto handle : targets)
+        wanted.push_back({330, hex_handle(handle)});
+    staged = *this;
+    if (record) {
+        staged.mutable_object(handle_value(existing)).set_subclass_fields("AcDbXrecord", wanted);
+    } else {
+        auto object = staged.make_record("XRECORD");
+        object.pairs_.insert(object.pairs_.end(), {{5, "0"}, {102, "{ACAD_REACTORS"}, {330, root}, {102, "}"},
+                                                   {100, "AcDbXrecord"}});
+        object.set_subclass_fields("AcDbXrecord", wanted);
+        staged.add_dictionary_object_impl(root, kRecomposeKey, std::move(object));
+    }
+    return true;
 }
 
 std::vector<std::uint64_t> DxfDocument::orphan_table_fields(std::uint64_t table) const {

@@ -326,22 +326,19 @@ fn main() {
     let rec = nod.get("ACDB_RECOMPOSE_DATA").expect("ACDB_RECOMPOSE_DATA");
     match tables.objects.get(&rec) {
         Some(ObjectType::XRecord(record)) => {
-            assert!(
-                record
-                    .entries
-                    .iter()
-                    .any(|entry| entry.code == 90 && matches!(entry.value, XRecordValue::Int32(1))),
-                "recompose flag"
-            );
-            assert!(
-                record
-                    .entries
-                    .iter()
-                    .any(|entry| entry.code == 330 && matches!(entry.value, XRecordValue::Handle(_))),
-                "recompose handle"
-            );
+            assert_eq!(record.entries.len(), 3);
+            assert_eq!(record.entries[0].code, 90);
+            assert_eq!(record.entries[0].value, XRecordValue::Int32(1));
+            assert_eq!(record.entries[1].code, 330);
+            let style = record.entries[1].value.as_handle().expect("table style handle");
+            assert!(matches!(tables.objects.get(&style), Some(ObjectType::TableStyle(_))));
+            assert!(tables.extension_dictionary_handle(style).is_some());
+            assert_eq!(record.entries[2].code, 330);
+            let table = record.entries[2].value.as_handle().expect("table handle");
+            assert!(matches!(tables.get_entity(table), Some(EntityType::Table(_))));
+            assert!(tables.xrecord(table, "ACAD_XREC_ROUNDTRIP").is_some());
         }
-            other => panic!("recompose {other:?}"),
+        other => panic!("recompose {other:?}"),
     }
 
     let hosted = read_dxf(Path::new(&format!("{prefix}-textfield.dxf")));

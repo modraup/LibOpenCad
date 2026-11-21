@@ -23,6 +23,26 @@ void check_header(std::string fields, DxfVersion version, int units) {
     check(doc.insertion_units() == units, "unexpected $INSUNITS");
 }
 
+void check_ucs_roundtrip(bool binary) {
+    std::istringstream input("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1032\n"
+        "9\n$UCSORG\n20\n2\n9\n$LUNITS\n70\n3\n9\n$PSTYLEMODE\n290\n0\n0\nENDSEC\n0\nEOF\n");
+    std::ostringstream encoded;
+    DxfDocument::read(input).write(encoded, binary);
+    std::istringstream source(encoded.str());
+    auto doc = DxfDocument::read(source);
+    const Point3 origin{2.5, -3.5, 4.5};
+    doc.set_model_space_ucs(origin, {0, 1, 0}, {-1, 0, 0});
+    check(doc.model_space_ucs_origin() == origin, "UCS partial point update");
+    std::ostringstream output;
+    doc.write(output);
+    const auto bytes = output.str();
+    check(bytes.find("$UCSORG") == bytes.rfind("$UCSORG"), "duplicated UCS header variable");
+    std::istringstream saved(bytes);
+    const auto result = DxfDocument::read(saved);
+    check(result.model_space_ucs_origin() == origin, "UCS point readback");
+    check(result.linear_unit_format() == 3 && !result.plot_style_mode(), "numeric header values");
+}
+
 void check_values() {
     const DxfVersion versions[] = {DxfVersion::AC1009, DxfVersion::AC1012, DxfVersion::AC1014,
         DxfVersion::AC1015, DxfVersion::AC1018, DxfVersion::AC1021, DxfVersion::AC1024,
@@ -46,6 +66,8 @@ int main(int argc, char** argv) {
     try {
         if (argc == 1) {
             check_values();
+            check_ucs_roundtrip(false);
+            check_ucs_roundtrip(true);
             return 0;
         }
         check(argc == 4, "expected format input.dxf result.txt");

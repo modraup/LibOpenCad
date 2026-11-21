@@ -17,7 +17,7 @@ void DwgDocument::set_history_active_node(std::uint64_t h, std::int32_t node) {
     if (matches != 1)
         throw std::invalid_argument("Missing or ambiguous active history node");
     DwgDocument staged(
-        detail::edit_dwg_history_slot(bytes_, objects_, h, r.active_begin, r.active_end, node, false));
+        detail::edit_dwg_history_slot(source_bytes(), objects_, h, r.active_begin, r.active_end, node, false));
     *this = std::move(staged);
 }
 void DwgDocument::set_history_evaluation_graph(std::uint64_t root, std::uint64_t graph) {
@@ -33,7 +33,7 @@ void DwgDocument::set_history_evaluation_graph(std::uint64_t root, std::uint64_t
     }
     if (matches != 1)
         throw std::invalid_argument("Active operation missing or ambiguous in target graph");
-    DwgDocument staged(detail::edit_dwg_history_slot(bytes_, objects_, root, r.graph_reference_begin,
+    DwgDocument staged(detail::edit_dwg_history_slot(source_bytes(), objects_, root, r.graph_reference_begin,
                                                      r.graph_reference_end, graph, true, 3));
     *this = std::move(staged);
 }
@@ -46,7 +46,7 @@ void DwgDocument::set_history_node_expression(std::uint64_t graph, std::int32_t 
     for (std::size_t i = 0; i < g.graph->nodes.size(); ++i)
         if (g.graph->nodes[i].id == node) {
             auto slot = g.reference_slots.at(i);
-            DwgDocument staged(detail::edit_dwg_history_slot(bytes_, objects_, graph, slot.first, slot.second,
+            DwgDocument staged(detail::edit_dwg_history_slot(source_bytes(), objects_, graph, slot.first, slot.second,
                                                              expression, true, 3));
             *this = std::move(staged);
             return;
@@ -64,7 +64,7 @@ void DwgDocument::set_history_material(std::uint64_t h, std::uint64_t material) 
             throw std::invalid_argument("Not a material");
     }
     DwgDocument staged(
-        detail::edit_dwg_history_slot(bytes_, objects_, h, r.material_begin, r.material_end, material, true));
+        detail::edit_dwg_history_slot(source_bytes(), objects_, h, r.material_begin, r.material_end, material, true));
     *this = std::move(staged);
 }
 void DwgDocument::set_surface_history(std::uint64_t h, std::uint64_t root) {
@@ -79,7 +79,7 @@ void DwgDocument::set_surface_history(std::uint64_t h, std::uint64_t root) {
     if (!r) {
         if (!root)
             return;
-        DwgDocument staged(detail::ensure_dwg_metadata(bytes_, objects_, h, "CADCODEC_SURFACE_HISTORY_V1",
+        DwgDocument staged(detail::ensure_dwg_metadata(source_bytes(), objects_, h, "CADCODEC_SURFACE_HISTORY_V1",
                                                        detail::surface_history_bytes(root)));
         auto graph = staged.modeler_history_graph(h);
         if (!graph || graph->root != root)
@@ -92,9 +92,9 @@ void DwgDocument::set_surface_history(std::uint64_t h, std::uint64_t root) {
     auto data = r->metadata;
     detail::metadata_put(data, 330, root, 8);
     auto id = r->handle;
-    DwgDocument staged(detail::edit_dwg_metadata(bytes_, objects_, id, data));
+    DwgDocument staged(detail::edit_dwg_metadata(source_bytes(), objects_, id, data));
     auto slot = staged.objects_.metadata_records.at(id).reference_slots.at(0);
-    staged = DwgDocument(detail::edit_dwg_history_slot(staged.bytes_, staged.objects_, id, slot.first,
+    staged = DwgDocument(detail::edit_dwg_history_slot(staged.source_bytes(), staged.objects_, id, slot.first,
                                                        slot.second, root, true, 4));
     *this = std::move(staged);
 }
@@ -149,7 +149,7 @@ void DwgDocument::set_history_loft_settings(std::uint64_t h, const HistoryLoftSe
         throw std::invalid_argument("Not loft history");
     detail::validate_loft_metadata(v);
     if (!detail::metadata_record(objects_, h, operation.extension_dictionary, "CADCODEC_LOFT_OPTIONS_V1")) {
-        DwgDocument staged(detail::ensure_dwg_metadata(bytes_, objects_, h, "CADCODEC_LOFT_OPTIONS_V1",
+        DwgDocument staged(detail::ensure_dwg_metadata(source_bytes(), objects_, h, "CADCODEC_LOFT_OPTIONS_V1",
                                                        detail::loft_metadata_bytes(v)));
         *this = std::move(staged);
     }
@@ -183,7 +183,7 @@ void DwgDocument::set_history_loft_settings(std::uint64_t h, const HistoryLoftSe
         auto path = read_history_profiles(probe, DxfVersion::AC1032).metadata_path;
         if (!path)
             throw std::invalid_argument("Missing loft metadata path");
-        auto version = dxf_version_from_string(bytes_.substr(0, 6));
+        auto version = dxf_version_from_string(source_bytes().substr(0, 6));
         // Validation and transcode occur before either object is modified.
         auto encoded = encode_embedded_profile(*path, version);
         (void)encoded;
@@ -196,8 +196,8 @@ void DwgDocument::set_history_loft_settings(std::uint64_t h, const HistoryLoftSe
     native.end_draft_angle = v.end_draft_angle;
     native.start_magnitude = v.start_magnitude;
     native.end_magnitude = v.end_magnitude;
-    DwgDocument staged(detail::edit_dwg_history_parameters(bytes_, objects_, h, record));
-    staged = DwgDocument(detail::edit_dwg_metadata(staged.bytes_, staged.objects_, id, filtered));
+    DwgDocument staged(detail::edit_dwg_history_parameters(source_bytes(), objects_, h, record));
+    staged = DwgDocument(detail::edit_dwg_metadata(staged.source_bytes(), staged.objects_, id, filtered));
     (void)staged.history_loft_settings(h);
     *this = std::move(staged);
 }
@@ -216,7 +216,7 @@ void DwgDocument::update_history_inputs(std::uint64_t h, const SolidHistoryParam
         throw std::invalid_argument("History parameter kind mismatch");
     record.operation->parameters = p;
     record.profiles = profiles;
-    DwgDocument staged(detail::edit_dwg_history_parameters(bytes_, objects_, h, record));
+    DwgDocument staged(detail::edit_dwg_history_parameters(source_bytes(), objects_, h, record));
     if (settings) {
         const auto &loft = std::get<HistoryLoft>(p);
         settings->start_draft_angle = loft.start_draft_angle;
@@ -228,7 +228,7 @@ void DwgDocument::update_history_inputs(std::uint64_t h, const SolidHistoryParam
             SolidHistoryOperation probe(SolidHistoryKind::Loft);
             HistoryProfileGeometry geometry;
             geometry.metadata_path = profiles.path;
-            set_history_profiles(probe, geometry, dxf_version_from_string(bytes_.substr(0, 6)));
+            set_history_profiles(probe, geometry, dxf_version_from_string(source_bytes().substr(0, 6)));
             settings->path = std::get<HistoryLoft>(probe.parameters).settings->path;
         }
         staged.set_history_loft_settings(h, *settings);
@@ -244,7 +244,7 @@ const DwgHistoryRecord &DwgDocument::history_record(std::uint64_t h) const {
 SolidHistoryGraph DwgDocument::create_solid_history(std::uint64_t entity, SolidHistoryOperation operation,
                                                     SurfaceProfiles profiles) {
     (void)modeler(entity);
-    DwgDocument staged(detail::create_dwg_history(bytes_, objects_, entity, std::move(operation), profiles));
+    DwgDocument staged(detail::create_dwg_history(source_bytes(), objects_, entity, std::move(operation), profiles));
     auto graph = staged.modeler_history_graph(entity);
     if (!graph)
         throw std::invalid_argument("History attachment failed");
@@ -254,7 +254,7 @@ SolidHistoryGraph DwgDocument::create_solid_history(std::uint64_t entity, SolidH
 SolidHistoryGraph DwgDocument::append_solid_history(std::uint64_t entity, SolidHistoryOperation operation,
                                                     SurfaceProfiles profiles) {
     (void)modeler(entity);
-    DwgDocument staged(detail::append_dwg_history(bytes_, objects_, entity, std::move(operation), profiles));
+    DwgDocument staged(detail::append_dwg_history(source_bytes(), objects_, entity, std::move(operation), profiles));
     auto graph = staged.modeler_history_graph(entity);
     if (!graph || !staged.history_record(*graph->evaluation_graph).graph)
         throw std::invalid_argument("Invalid appended history");

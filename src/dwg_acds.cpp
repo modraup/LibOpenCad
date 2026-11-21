@@ -2,8 +2,8 @@
 // AcDs record/blob association, ported from acadrust io/dwg/dwg_reader.rs.
 #include "dwg_modeler_internal.hpp"
 #include "acis_sab_internal.hpp"
+#include "dwg_sections_internal.hpp"
 #include <libopencad/acis.hpp>
-#include <libopencad/dwg_sections.hpp>
 #include <algorithm>
 #include <set>
 #include <optional>
@@ -466,7 +466,7 @@ std::string replace_dwg_acds_body(std::string_view b, std::uint64_t h, const Byt
     return out;
 }
 #include "dwg_acds_create.inc"
-void attach_dwg_modeler_data(std::string_view file, DwgR2000Objects &objects) {
+void attach_dwg_modeler_data(const DwgPagedReader &reader, DwgR2000Objects &objects) {
     std::set<std::uint64_t> wanted;
     for (auto &[h, m] : objects.modelers)
         if (m.properties.has_ds_data)
@@ -474,7 +474,7 @@ void attach_dwg_modeler_data(std::string_view file, DwgR2000Objects &objects) {
     if (wanted.empty())
         return;
     try {
-        auto section = read_dwg_paged_section(file, "AcDb:AcDsPrototype_1b");
+        auto section = reader.read("AcDb:AcDsPrototype_1b");
         auto blobs = decode_dwg_acds(section, wanted);
         for (auto h : wanted) {
             auto it = blobs.find(h);

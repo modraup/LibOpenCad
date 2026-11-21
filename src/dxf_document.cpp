@@ -740,10 +740,7 @@ std::int16_t DxfDocument::header_int16(std::string_view name, std::int16_t fallb
         if (p.code == 9)
             variable = std::string(trim(p.value));
         else if ((p.code == 70 || p.code == 90) && variable == name) {
-            try {
-                found = static_cast<std::int16_t>(integer(p.value));
-            } catch (...) {
-            }
+            found = detail::as_i16(p.code, p.value, binary_).value_or(found);
         }
     }
     return found;
@@ -759,8 +756,12 @@ bool DxfDocument::header_bool290(std::string_view name, bool fallback) const {
         if (p.code == 9)
             variable = std::string(trim(p.value));
         else if (p.code == 290 && variable == name) {
-            auto t = trim(p.value);
-            found = !(t == "0" || t == "false" || t == "FALSE");
+            if (binary_)
+                found = detail::as_i16(p.code, p.value, true).value() != 0;
+            else {
+                auto t = trim(p.value);
+                found = !(t == "0" || t == "false" || t == "FALSE");
+            }
         }
     }
     return found;
@@ -770,28 +771,20 @@ Point3 DxfDocument::header_point(std::string_view name, Point3 fallback) const {
     if (!header_index_)
         return fallback;
     const auto &header = record_at({*header_index_, std::nullopt, false});
-    std::string variable;
+    bool matching = false;
     Point3 found = fallback;
-    for (const auto &p : header.pairs_) {
+    for (std::size_t i = 0; i < header.pairs_.size(); ++i) {
+        const auto &p = header.pairs_[i];
         if (p.code == 9)
-            variable = std::string(trim(p.value));
-        else if (variable == name) {
-            auto parse = [&](std::string_view text, double current) {
-                text = trim(text);
-                if (text.empty())
-                    return current;
-                try {
-                    return std::stod(std::string(text));
-                } catch (...) {
-                    return current;
-                }
-            };
-            if (p.code == 10)
-                found.x = parse(p.value, found.x);
-            else if (p.code == 20)
-                found.y = parse(p.value, found.y);
-            else if (p.code == 30)
-                found.z = parse(p.value, found.z);
+            matching = trim(p.value) == name;
+        else if (matching) {
+            try {
+                if (p.code == 10) found.x = header.number_at(i);
+                if (p.code == 20) found.y = header.number_at(i);
+                if (p.code == 30) found.z = header.number_at(i);
+            } catch (const std::runtime_error &) {
+                // Keep the previous component for a malformed header value.
+            }
         }
     }
     return found;
@@ -801,48 +794,36 @@ void DxfDocument::set_header_point(std::string_view name, Point3 value) {
     if (!header_index_)
         return;
     auto &header = const_cast<DxfRecord &>(record_at({*header_index_, std::nullopt, false}));
-    std::string variable;
-    std::optional<std::size_t> x, y, z;
-    for (std::size_t i = 0; i < header.pairs_.size(); ++i) {
-        const auto &p = header.pairs_[i];
-        if (p.code == 9)
-            variable = std::string(trim(p.value));
-        else if (variable == name) {
-            if (p.code == 10)
-                x = i;
-            else if (p.code == 20)
-                y = i;
-            else if (p.code == 30)
-                z = i;
-        }
-    }
-    auto encoded = [&](double n) { return header.encode_number(n); };
-    if (x)
-        header.pairs_[*x].value = encoded(value.x);
-    if (y)
-        header.pairs_[*y].value = encoded(value.y);
-    if (z)
-        header.pairs_[*z].value = encoded(value.z);
-    if (x && y && z)
+    const DxfRecord::Pair components[] = {
+        {10, header.encode_number(value.x)},
+        {20, header.encode_number(value.y)},
+        {30, header.encode_number(value.z)}
+    };
+    auto &pairs = header.pairs_;
+    auto variable = std::find_if(pairs.rbegin(), pairs.rend(), [&](const auto &p) {
+        return p.code == 9 && trim(p.value) == name;
+    });
+    if (variable == pairs.rend()) {
+        pairs.push_back({9, std::string(name)});
+        pairs.insert(pairs.end(), std::begin(components), std::end(components));
         return;
-    std::size_t insert_at = header.pairs_.size();
-    for (std::size_t i = 1; i < header.pairs_.size(); ++i) {
-        if (header.pairs_[i].code == 0) {
-            insert_at = i;
-            break;
+    }
+
+    const auto start = variable.base() - pairs.begin();
+    for (const auto &component : components) {
+        auto first = pairs.begin() + start;
+        auto end = std::find_if(first, pairs.end(), [](const auto &p) { return p.code == 9 || p.code == 0; });
+        auto last = std::find_if(std::make_reverse_iterator(end), std::make_reverse_iterator(first),
+                                 [&](const auto &p) { return p.code == component.code; });
+        if (last.base() != first) {
+            last->value = component.value;
+        } else {
+            auto next = std::find_if(first, end, [&](const auto &p) {
+                return (p.code == 20 || p.code == 30) && p.code > component.code;
+            });
+            pairs.insert(next, component);
         }
     }
-    std::vector<DxfRecord::Pair> added;
-    if (!x || !y || !z)
-        added.push_back({9, std::string(name)});
-    if (!x)
-        added.push_back({10, encoded(value.x)});
-    if (!y)
-        added.push_back({20, encoded(value.y)});
-    if (!z)
-        added.push_back({30, encoded(value.z)});
-    header.pairs_.insert(header.pairs_.begin() + static_cast<std::ptrdiff_t>(insert_at), added.begin(),
-                         added.end());
 }
 
 std::int16_t DxfDocument::linear_unit_format() const { return header_int16("$LUNITS", 2); }
@@ -2024,6 +2005,8 @@ bool DxfDocument::remove_entity(std::string_view handle) {
     // Rust removes from the entity index and filters block membership through it.
     // This record model derives membership from explicit owners; rebuild both indexes.
     DxfDocument staged = *this;
+    if (type == "ACAD_TABLE")
+        staged.forget_table_recompose_target(identity);
     auto clean_reactors = [&](DxfRecord& record) {
         auto& pairs = record.pairs_;
         std::vector<bool> erase(pairs.size(), false);
@@ -2402,7 +2385,9 @@ std::uint64_t DxfDocument::allocate_handle() {
 
 void DxfDocument::write(std::ostream& out, bool binary) const {
     if (binary == binary_) { write(out); return; }
-    DxfDocument converted = *this;
+    DxfDocument converted;
+    if (!stage_table_recompose_data(converted))
+        converted = *this;
     auto convert = [&](DxfRecord& record) {
         for (auto& pair : record.pairs_) {
             if (detail::is_string_value(pair.code)) {
@@ -2427,10 +2412,18 @@ void DxfDocument::write(std::ostream& out, bool binary) const {
     }
     converted.binary_ = binary;
     converted.compact_codes_ = binary && version_ == DxfVersion::AC1009;
-    converted.write(out);
+    converted.write_prepared(out);
 }
 
 void DxfDocument::write(std::ostream& out) const {
+    DxfDocument staged;
+    if (stage_table_recompose_data(staged))
+        staged.write_prepared(out);
+    else
+        write_prepared(out);
+}
+
+void DxfDocument::write_prepared(std::ostream& out) const {
     if (binary_) out.write(detail::binary_signature.data(), detail::binary_signature.size());
     // Class instance counts are derived metadata; stale zero counts can hide class-based entities.
     std::unordered_set<std::string> counted_classes{"FIELD", "FIELDLIST", "MATERIAL", "IMAGE", "WIPEOUT", "IMAGEDEF", "IMAGEDEF_REACTOR", "RASTERVARIABLES", "PDFUNDERLAY", "DWFUNDERLAY", "DGNUNDERLAY", "PDFDEFINITION", "DWFDEFINITION", "DGNDEFINITION", "CELLSTYLEMAP", "TABLETEMPLATE", "TABLECONTENT", "TABLEGEOMETRY", "ACAD_TABLE", "TABLESTYLE", "MULTILEADER", "MLEADERSTYLE", "LAYOUT", "HELIX", "ARC_DIMENSION", "LARGE_RADIAL_DIMENSION"};

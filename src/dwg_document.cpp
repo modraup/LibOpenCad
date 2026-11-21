@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "dwg_edit_internal.hpp"
+#include "dwg_mapped_file.hpp"
 #include "dwg_metadata_internal.hpp"
+#include "dwg_read_internal.hpp"
 #include "dwg_sections_internal.hpp"
 #include "surface_profiles.hpp"
 #include "dxf_code_page.hpp"
@@ -16,6 +18,7 @@
 #include <string_view>
 #include <ostream>
 #include <stdexcept>
+#include <system_error>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -41,8 +44,31 @@ template <class T, class V> void extrusion(T &e, const V &v) {
     e.set_thickness(v.thickness);
     e.set_normal(v.normal);
 }
+std::string read_dwg_stream(std::istream &input, DwgReadStatistics &stats) {
+    if (!input)
+        throw DwgReadError("Cannot read DWG", std::move(stats));
+    std::string bytes{std::istreambuf_iterator<char>(input), {}};
+    if (input.bad())
+        throw DwgReadError("Cannot read DWG", std::move(stats));
+    return bytes;
+}
 } // namespace
 DwgDocument::DwgDocument(std::string bytes) : bytes_(std::move(bytes)), objects_(read_dwg_objects(bytes_)) {
+    finish_read();
+}
+DwgDocument::DwgDocument(std::string bytes, DwgR2000Objects objects, bool writable)
+    : bytes_(std::move(bytes)), objects_(std::move(objects)), writable_(writable) {
+    finish_read();
+}
+DwgDocument::DwgDocument(std::shared_ptr<const detail::DwgMappedFile> mapping, DwgR2000Objects objects,
+                         bool writable)
+    : mapped_bytes_(std::move(mapping)), objects_(std::move(objects)), writable_(writable) {
+    finish_read();
+}
+std::string_view DwgDocument::source_bytes() const noexcept {
+    return mapped_bytes_ ? mapped_bytes_->view() : std::string_view(bytes_);
+}
+void DwgDocument::finish_read() {
     for (auto &[h, rec] : objects_.associative_records) {
         auto record = objects_.records.find(h);
         if (record == objects_.records.end())
@@ -94,15 +120,56 @@ DwgDocument DwgDocument::read(std::istream &input) {
         throw std::runtime_error("Cannot read DWG");
     return DwgDocument(std::move(bytes));
 }
+DwgDocument DwgDocument::read(std::istream &input, const DwgReadOptions &options) {
+    return read_with_stats(input, options).document;
+}
+DwgReadOutcome DwgDocument::read_with_stats(std::istream &input, const DwgReadOptions &options) {
+    DwgReadStatistics stats;
+    stats.recovery_mode = options.failsafe;
+    auto bytes = read_dwg_stream(input, stats);
+    auto data = detail::read_dwg_with_stats(bytes, stats, options.password);
+    return {DwgDocument(std::move(bytes), std::move(data.objects), data.writable), std::move(stats), data.writable};
+}
+DwgReadOutcome DwgDocument::from_mmap(const std::filesystem::path &path, const DwgReadOptions &options) {
+    DwgReadStatistics stats;
+    stats.recovery_mode = options.failsafe;
+    std::shared_ptr<const detail::DwgMappedFile> mapping;
+    try {
+        mapping = std::make_shared<detail::DwgMappedFile>(path);
+    } catch (const std::system_error &error) {
+        throw DwgReadError(error.what(), std::move(stats));
+    }
+    auto data = detail::read_dwg_with_stats(mapping->view(), stats, options.password);
+    return {DwgDocument(std::move(mapping), std::move(data.objects), data.writable), std::move(stats), data.writable};
+}
+DwgRecoverOutcome DwgDocument::recover(std::istream &input) {
+    return recover(input, {});
+}
+DwgRecoverOutcome DwgDocument::recover(std::istream &input, const DwgReadOptions &options) {
+    DwgReadStatistics stats;
+    stats.recovery_mode = true;
+    try {
+        auto bytes = read_dwg_stream(input, stats);
+        RepairReport repair;
+        auto data = detail::recover_dwg_bytes(bytes, stats, repair, options.password);
+        return {DwgDocument(std::move(bytes), std::move(data.objects), data.writable), std::move(stats),
+                std::move(repair), data.writable};
+    } catch (const DwgReadError &error) {
+        throw DwgRecoveryError(error.what(), error.stats());
+    }
+}
 void DwgDocument::write(std::ostream &out) const {
-    out.write(bytes_.data(), bytes_.size());
+    if (!writable_)
+        throw std::runtime_error("DWG document cannot be written safely");
+    const auto bytes = source_bytes();
+    out.write(bytes.data(), bytes.size());
     if (!out)
         throw std::runtime_error("Cannot write DWG");
 }
 void DwgDocument::initialize(DxfEntity &e, const char *type, std::uint64_t h,
                              const DwgR2000EntityProperties &p) const {
     e.pairs_ = {{0, type}, {5, hex(h)}};
-    e.version_ = dxf_version_from_string(std::string_view(bytes_).substr(0, 6));
+    e.version_ = dxf_version_from_string(source_bytes().substr(0, 6));
     e.set_color(p.color);
     e.uses_dwg_color_book_ = p.color_book != 0;
     e.set_transparency(Transparency::from_alpha_value(p.transparency));
@@ -117,7 +184,7 @@ void DwgDocument::initialize(DxfEntity &e, const char *type, std::uint64_t h,
     if (p.linetype && objects_.symbols.count(p.linetype))
         e.set_linetype(objects_.symbols.at(p.linetype).name);
     auto owner = p.owner;
-    if (bytes_.compare(0, 6, "AC1009") == 0) {
+    if (source_bytes().compare(0, 6, "AC1009") == 0) {
         auto slot = p.legacy_linetype_index;
         if (slot == 32766 || slot == 65534)
             e.set_linetype("ByBlock");
@@ -192,9 +259,9 @@ void DwgDocument::update_surface(std::uint64_t h, const DwgSurface &value) {
     if (fallback)
         replacement = {{fallback->handle, detail::metadata_profile_bytes(
                                               detail::encode_loft_profile_metadata(value.profiles))}};
-    DwgDocument staged(detail::edit_dwg_surface(bytes_, objects_, h, value));
+    DwgDocument staged(detail::edit_dwg_surface(source_bytes(), objects_, h, value));
     if (replacement)
-        staged = DwgDocument(detail::edit_dwg_metadata(staged.bytes_, staged.objects_, replacement->first,
+        staged = DwgDocument(detail::edit_dwg_metadata(staged.source_bytes(), staged.objects_, replacement->first,
                                                        replacement->second));
     (void)staged.surface(h);
     *this = std::move(staged);
@@ -221,7 +288,7 @@ std::uint64_t DwgDocument::add_modeler(ModelerKind kind, const acis::SatDocument
     if (!type)
         throw std::invalid_argument("Use add_surface for surface construction inputs");
     std::uint64_t id;
-    DwgDocument staged(detail::add_dwg_modeler(bytes_, objects_, type, nullptr, target, id));
+    DwgDocument staged(detail::add_dwg_modeler(source_bytes(), objects_, type, nullptr, target, id));
     staged.set_modeler_geometry(id, geometry);
     *this = std::move(staged);
     return id;
@@ -231,11 +298,11 @@ std::uint64_t DwgDocument::add_surface(const DwgSurface &value, const acis::SatD
     DwgDocument staged = *this;
     auto it = std::find(staged.objects_.class_names.begin(), staged.objects_.class_names.end(), value.type);
     if (it == staged.objects_.class_names.end())
-        staged = DwgDocument(detail::register_dwg_surface(staged.bytes_, staged.objects_, value.type));
+        staged = DwgDocument(detail::register_dwg_surface(staged.source_bytes(), staged.objects_, value.type));
     it = std::find(staged.objects_.class_names.begin(), staged.objects_.class_names.end(), value.type);
     std::uint64_t id;
     auto type = 500 + std::distance(staged.objects_.class_names.begin(), it);
-    staged = DwgDocument(detail::add_dwg_modeler(staged.bytes_, staged.objects_, type, &value, target, id));
+    staged = DwgDocument(detail::add_dwg_modeler(staged.source_bytes(), staged.objects_, type, &value, target, id));
     staged.set_modeler_geometry(id, geometry);
     *this = std::move(staged);
     return id;
@@ -244,7 +311,7 @@ std::uint64_t DwgDocument::copy_modeler(std::uint64_t h, std::uint64_t target,
                                         std::map<std::uint64_t, std::uint64_t> *remapping) {
     (void)modeler(h);
     std::map<std::uint64_t, std::uint64_t> ids;
-    DwgDocument staged(detail::copy_dwg_modeler(bytes_, objects_, h, target, ids));
+    DwgDocument staged(detail::copy_dwg_modeler(source_bytes(), objects_, h, target, ids));
     auto id = ids.at(h);
     (void)staged.modeler(id);
     if (staged.objects_.history_errors.size() > objects_.history_errors.size() ||
@@ -257,7 +324,7 @@ std::uint64_t DwgDocument::copy_modeler(std::uint64_t h, std::uint64_t target,
 }
 void DwgDocument::remove_modeler(std::uint64_t h) {
     (void)modeler(h);
-    DwgDocument staged(detail::remove_dwg_modeler(bytes_, objects_, h));
+    DwgDocument staged(detail::remove_dwg_modeler(source_bytes(), objects_, h));
     if (staged.objects_.records.count(h))
         throw std::runtime_error("Deleted modeler still indexed");
     *this = std::move(staged);
@@ -266,14 +333,14 @@ void DwgDocument::set_modeler_geometry(std::uint64_t h, const acis::SatDocument 
     (void)modeler(h);
     if (geometry.records.empty())
         throw std::invalid_argument("Replacement modeler geometry is empty");
-    DwgDocument staged(detail::edit_dwg_modeler(bytes_, objects_, h, geometry));
+    DwgDocument staged(detail::edit_dwg_modeler(source_bytes(), objects_, h, geometry));
     (void)staged.modeler(h);
     *this = std::move(staged);
 }
 void DwgDocument::clear_modeler_geometry(std::uint64_t h) {
     if (modeler(h).acis_empty)
         return;
-    DwgDocument staged(detail::clear_dwg_modeler(bytes_, objects_, h));
+    DwgDocument staged(detail::clear_dwg_modeler(source_bytes(), objects_, h));
     if (!staged.modeler(h).acis_empty)
         throw std::runtime_error("Modeler clear did not synchronize state");
     *this = std::move(staged);
@@ -333,7 +400,7 @@ DxfText DwgDocument::text(std::uint64_t h) const {
     d.generation_flags = t.generation;
     d.horizontal_alignment = t.horizontal;
     d.vertical_alignment = t.vertical;
-    if (bytes_.compare(0, 6, "AC1009") == 0)
+    if (source_bytes().compare(0, 6, "AC1009") == 0)
         d.style = objects_.legacy_symbol_names.at(53).at(t.style);
     else if (objects_.symbols.count(t.style))
         d.style = objects_.symbols.at(t.style).name;
@@ -380,7 +447,7 @@ void DwgDocument::update(const DxfText &entity) {
         assign(desired.oblique_angle, requested.oblique_angle, original.oblique_angle);
     assign(desired.thickness, requested.thickness, original.thickness);
     assign(desired.normal, requested.normal, original.normal);
-    const bool legacy = bytes_.compare(0, 6, "AC1009") == 0;
+    const bool legacy = source_bytes().compare(0, 6, "AC1009") == 0;
     // acadrust's AC1009 record writer stores generation flags as an unsigned byte.
     const auto generation =
         legacy ? static_cast<std::int16_t>(static_cast<std::uint8_t>(requested.generation_flags))
@@ -424,15 +491,15 @@ void DwgDocument::update(const DxfText &entity) {
     }
     std::optional<DwgDocument> staged;
     if (format)
-        staged = DwgDocument(detail::format_dwg_text(bytes_, objects_, h, desired));
+        staged = DwgDocument(detail::format_dwg_text(source_bytes(), objects_, h, desired));
     const auto &source = staged ? *staged : *this;
     if (entity.text() != before.text() || entity.insertion_point() != before.insertion_point())
-        staged = DwgDocument(detail::edit_dwg_text(source.bytes_, source.objects_, h, entity.text(),
+        staged = DwgDocument(detail::edit_dwg_text(source.source_bytes(), source.objects_, h, entity.text(),
                                                    entity.insertion_point()));
     if (detail::symbol_name_key(entity.layer()) != detail::symbol_name_key(before.layer())) {
         const auto &current = staged ? *staged : *this;
         staged =
-            DwgDocument(detail::set_dwg_entity_layer(current.bytes_, current.objects_, h, entity.layer()));
+            DwgDocument(detail::set_dwg_entity_layer(current.source_bytes(), current.objects_, h, entity.layer()));
     }
     apply_common(entity, before, staged);
     if (staged)
@@ -509,8 +576,8 @@ std::optional<std::string> DwgDocument::edit_geometry_layer(const E &entity, con
     else
         props = &objects_.arcs.at(h).properties;
     if (name == detail::symbol_name_key(before.layer()))
-        layer = bytes_.compare(0, 6, "AC1009") == 0 ? props->legacy_layer_index : props->layer;
-    else if (bytes_.compare(0, 6, "AC1009") == 0) {
+        layer = source_bytes().compare(0, 6, "AC1009") == 0 ? props->legacy_layer_index : props->layer;
+    else if (source_bytes().compare(0, 6, "AC1009") == 0) {
         auto &names = objects_.legacy_symbol_names.at(51);
         for (std::size_t i = 0; i < names.size(); i++)
             if (detail::symbol_name_key(names[i]) == name)
@@ -521,7 +588,7 @@ std::optional<std::string> DwgDocument::edit_geometry_layer(const E &entity, con
                 layer = id;
     if (!layer)
         throw std::invalid_argument("Unknown DWG layer");
-    return detail::edit_dwg_primitive(bytes_, objects_, h, value, *layer);
+    return detail::edit_dwg_primitive(source_bytes(), objects_, h, value, *layer);
 }
 
 template <class E> void DwgDocument::apply(const E &entity, const E &before) {
@@ -543,10 +610,10 @@ void DwgDocument::apply_common(const DxfEntity &entity, const DxfEntity &before,
     auto handle = identity(entity);
     if (name_key(name) != name_key(before.linetype()))
         staged =
-            DwgDocument(detail::set_dwg_entity_linetype(source().bytes_, source().objects_, handle, name));
+            DwgDocument(detail::set_dwg_entity_linetype(source().source_bytes(), source().objects_, handle, name));
     auto color = entity.color();
     if (color != before.color() || (before.uses_dwg_color_book_ && !entity.uses_dwg_color_book_))
-        staged = DwgDocument(detail::set_dwg_entity_color(source().bytes_, source().objects_, handle, color));
+        staged = DwgDocument(detail::set_dwg_entity_color(source().source_bytes(), source().objects_, handle, color));
     std::optional<bool> invisible;
     if (before.version_ >= DxfVersion::AC1012 && entity.is_invisible() != before.is_invisible())
         invisible = entity.is_invisible();
@@ -563,7 +630,7 @@ void DwgDocument::apply_common(const DxfEntity &entity, const DxfEntity &before,
     if (before.version_ >= DxfVersion::AC1018 && entity.transparency() != before.transparency())
         transparency = entity.transparency();
     if (transparency || scale || invisible || weight)
-        staged = DwgDocument(detail::set_dwg_entity_display(source().bytes_, source().objects_, handle,
+        staged = DwgDocument(detail::set_dwg_entity_display(source().source_bytes(), source().objects_, handle,
                                                             transparency, scale, invisible, weight));
 }
 void DwgDocument::update(const DxfLine &e) { apply(e, line(identity(e))); }
@@ -574,7 +641,7 @@ std::uint64_t DwgDocument::add_layer(std::string_view name, int color) {
     if (color < 1 || color > 255)
         throw std::invalid_argument("Expected an ACI layer color between 1 and 255");
     std::uint64_t id{};
-    *this = DwgDocument(detail::add_dwg_layer(bytes_, objects_, name, color, id));
+    *this = DwgDocument(detail::add_dwg_layer(source_bytes(), objects_, name, color, id));
     return id;
 }
 std::uint64_t DwgDocument::add_linetype(std::string_view name, const std::vector<double> &segments,
@@ -584,11 +651,11 @@ std::uint64_t DwgDocument::add_linetype(std::string_view name, const std::vector
         throw std::invalid_argument("DWG linetype description contains NUL");
     detail::utf8_scalars(description);
     std::uint64_t id{};
-    *this = DwgDocument(detail::add_dwg_linetype(bytes_, objects_, name, segments, description, id));
+    *this = DwgDocument(detail::add_dwg_linetype(source_bytes(), objects_, name, segments, description, id));
     return id;
 }
 void DwgDocument::set_layer_linetype(std::string_view layer, std::string_view linetype) {
-    auto bytes = detail::set_dwg_layer_linetype(bytes_, objects_, layer, linetype);
+    auto bytes = detail::set_dwg_layer_linetype(source_bytes(), objects_, layer, linetype);
     if (bytes) *this = DwgDocument(std::move(*bytes));
 }
 void DwgDocument::move_entity(std::uint64_t entity, std::uint64_t target) {
@@ -601,11 +668,11 @@ void DwgDocument::move_entity(std::uint64_t entity, std::uint64_t target) {
         }
     if (!block)
         throw std::invalid_argument("Expected a block record or layout handle");
-    *this = DwgDocument(detail::move_dwg_entity(bytes_, objects_, entity, block));
+    *this = DwgDocument(detail::move_dwg_entity(source_bytes(), objects_, entity, block));
 }
 void DwgDocument::move_entity(std::uint64_t entity, std::string_view name) {
-    if (bytes_.compare(0, 6, "AC1009") == 0) {
-        *this = DwgDocument(detail::move_legacy_entity(bytes_, objects_, entity, name));
+    if (source_bytes().compare(0, 6, "AC1009") == 0) {
+        *this = DwgDocument(detail::move_legacy_entity(source_bytes(), objects_, entity, name));
         return;
     }
     auto key = detail::symbol_name_key(name);
@@ -624,7 +691,7 @@ void DwgDocument::move_entity(std::uint64_t entity, std::string_view name) {
 }
 
 namespace {
-std::uint32_t preview_seeker(const std::string &bytes) {
+std::uint32_t preview_seeker(std::string_view bytes) {
     if (bytes.size() < 17)
         return 0;
     return static_cast<unsigned char>(bytes[13]) |
@@ -635,34 +702,37 @@ std::uint32_t preview_seeker(const std::string &bytes) {
 } // namespace
 
 std::optional<Preview> DwgDocument::preview() const {
-    const auto base = preview_seeker(bytes_);
-    if (!base || base >= bytes_.size())
+    const auto bytes = source_bytes();
+    const auto base = preview_seeker(bytes);
+    if (!base || base >= bytes.size())
         return std::nullopt;
-    return parse_dwg_preview(std::string_view(bytes_).substr(base), base);
+    return parse_dwg_preview(bytes.substr(base), base);
 }
 
 void DwgDocument::set_preview(std::optional<Preview> value) {
-    auto base = preview_seeker(bytes_);
+    const auto bytes = source_bytes();
+    auto base = preview_seeker(bytes);
     auto payload = build_dwg_preview(value ? &*value : nullptr, base);
-    if (bytes_.size() >= 6 && bytes_.compare(0, 6, "AC1018") >= 0) {
-        auto replace = bytes_.compare(0, 6, "AC1021") == 0 ? detail::replace_ac21_sections
-                                                           : detail::replace_ac18_sections;
-        *this = DwgDocument(replace(bytes_, {{"AcDb:Preview", std::move(payload)}}));
+    if (bytes.size() >= 6 && bytes.compare(0, 6, "AC1018") >= 0) {
+        auto replace = bytes.compare(0, 6, "AC1021") == 0 ? detail::replace_ac21_sections
+                                                        : detail::replace_ac18_sections;
+        *this = DwgDocument(replace(bytes, {{"AcDb:Preview", std::move(payload)}}));
         return;
     }
-    if (!base || base >= bytes_.size())
+    if (!base || base >= bytes.size())
         throw std::invalid_argument("DWG preview seeker is missing");
-    auto overall = dwg_preview_overall_size(std::string_view(bytes_).substr(base));
-    auto old_len = overall ? dwg_preview_container_len(*overall) : 0;
-    if (old_len && base + old_len <= bytes_.size() && payload.size() == old_len) {
+    auto overall = dwg_preview_overall_size(bytes.substr(base));
+    const auto old_len = overall ? dwg_preview_container_len(*overall) : 0;
+    if (!old_len || old_len > bytes.size() - base ||
+        (old_len != payload.size() && old_len != bytes.size() - base))
+        throw std::invalid_argument("DWG preview rewrite requires a paged preview section");
+    if (mapped_bytes_) {
+        auto edited = std::string(bytes);
+        edited.replace(base, old_len, payload);
+        bytes_ = std::move(edited);
+        mapped_bytes_.reset();
+    } else {
         bytes_.replace(base, old_len, payload);
-        return;
     }
-    if (old_len && base + old_len == bytes_.size()) {
-        bytes_.resize(base);
-        bytes_ += payload;
-        return;
-    }
-    throw std::invalid_argument("DWG preview rewrite requires a paged preview section");
 }
 } // namespace libopencad

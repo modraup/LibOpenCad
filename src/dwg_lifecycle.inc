@@ -54,11 +54,12 @@ struct LifecycleStorage {
     std::string section;
     std::string_view bytes;
     const char *page;
-    LifecycleStorage(std::string_view file) : version(unsigned(dxf_version_from_string(file.substr(0, 6)))) {
+    LifecycleStorage(std::string_view file, std::optional<std::string> object_section = std::nullopt)
+        : version(unsigned(dxf_version_from_string(file.substr(0, 6)))) {
         require(version >= 1012, "Modeler lifecycle requires R13+");
         page = drawing_code_page(file, version);
         if (version >= 1018) {
-            section = read_dwg_paged_section(file, "AcDb:AcDbObjects");
+            section = object_section ? std::move(*object_section) : read_dwg_paged_section(file, "AcDb:AcDbObjects");
             bytes = section;
         } else
             bytes = file;
@@ -145,11 +146,19 @@ std::string lifecycle_header(std::string_view file, unsigned v) {
     auto i = read_dwg_linear_index(file).sections.at(0);
     return std::string(file.substr(i.offset, i.size));
 }
+struct LifecycleRecoverySource {
+    const LifecycleStorage &storage;
+    const DwgR2000Index &index;
+};
 // Rebuild records and offset map together; opaque survivors and gaps remain byte-for-byte.
 std::string lifecycle_rewrite(std::string_view file, const DwgR2000Objects &o, const LifecycleEdits &edits,
                               const std::set<std::uint64_t> &removed, const LifecycleEdits &added,
-                              const std::optional<std::string> &header = {}, std::uint64_t next = 0) {
-    LifecycleStorage s(file);
+                              const std::optional<std::string> &header = {}, std::uint64_t next = 0,
+                              const LifecycleRecoverySource *recovery = nullptr) {
+    std::optional<LifecycleStorage> current;
+    if (!recovery)
+        current.emplace(file);
+    const auto &s = recovery ? recovery->storage : *current;
     auto v = s.version;
     std::map<std::size_t, std::uint64_t> order;
     for (auto &[h, r] : o.records)
@@ -202,19 +211,33 @@ std::string lifecycle_rewrite(std::string_view file, const DwgR2000Objects &o, c
         }
         if (!touched.empty())
             sections["AcDb:Classes"] = lifecycle_classes(file, classes);
-        auto free = read_dwg_paged_section(file, "AcDb:ObjFreeSpace");
-        set_integer(free, 4, offsets.size(), 4);
-        sections["AcDb:ObjFreeSpace"] = std::move(free);
+        auto optional_section = [&](std::string_view name) -> std::optional<std::string> {
+            try {
+                return read_dwg_paged_section(file, name);
+            } catch (const std::invalid_argument &error) {
+                if (!recovery || std::string_view(error.what()) != "DWG section not found")
+                    throw;
+                return std::nullopt;
+            }
+        };
+        if (auto free = optional_section("AcDb:ObjFreeSpace")) {
+            set_integer(*free, 4, offsets.size(), 4);
+            sections["AcDb:ObjFreeSpace"] = std::move(*free);
+        }
         if (header) {
             sections["AcDb:Header"] = *header;
-            auto aux = read_dwg_paged_section(file, "AcDb:AuxHeader");
-            update_aux_seed(aux, v, next);
-            sections["AcDb:AuxHeader"] = std::move(aux);
+            if (auto aux = optional_section("AcDb:AuxHeader")) {
+                update_aux_seed(*aux, v, next);
+                sections["AcDb:AuxHeader"] = std::move(*aux);
+            }
         }
         auto replace = v == 1021 ? detail::replace_ac21_sections : detail::replace_ac18_sections;
         return replace(file, sections);
     }
-    auto idx = read_dwg_linear_index(file);
+    std::optional<DwgR2000Index> current_index;
+    if (!recovery)
+        current_index = read_dwg_linear_index(file);
+    const auto &idx = recovery ? recovery->index : *current_index;
     auto map = idx.sections.at(2);
     struct Change {
         std::size_t length;

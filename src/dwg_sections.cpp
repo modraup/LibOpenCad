@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 // acadrust dwg_reader, checksum and decompressor_ac18.
 #include "dwg_sections_internal.hpp"
+#include "dwg_security.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <libopencad/dwg_sections.hpp>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <variant>
 #include <vector>
 namespace libopencad {
 namespace {
@@ -251,14 +253,18 @@ std::string deinterleave(View bytes, std::size_t count, std::size_t factor, unsi
 std::uint64_t crc21(View data, bool normal, std::uint64_t seed = 0);
 std::string reordered_crc_input(View data);
 std::string page21(View file, std::size_t offset, std::size_t compressed, std::size_t size,
-                   std::size_t repeat, unsigned block, std::uint64_t expected_crc, std::uint64_t seed) {
+                   std::size_t repeat, unsigned block, std::uint64_t expected_crc, std::uint64_t seed,
+                   const detail::DwgCipherKey *key = nullptr) {
     check(compressed && compressed <= 16 * 1024 * 1024 && size <= 16 * 1024 * 1024 && repeat > 0,
           "Invalid AC21 page size");
     auto aligned = (compressed + 7) & ~std::size_t(7);
     check(repeat <= 100000000 / aligned, "Invalid AC21 repetition factor");
     auto factor = (aligned * repeat + block - 1) / block;
     auto stored = deinterleave(slice(file, offset, factor * 255), compressed, factor, block);
-    check(crc21(stored, false, seed) == expected_crc, "AC21 compressed page CRC mismatch");
+    if (key)
+        detail::decrypt_dwg_page(stored, *key);
+    else
+        check(crc21(stored, false, seed) == expected_crc, "AC21 compressed page CRC mismatch");
     return compressed == size ? stored : inflate21(stored, size);
 }
 struct Directory21 {
@@ -299,53 +305,90 @@ Directory21 directory21(View file) {
     check(crc21(directory, false, field(30)) == field(21), "AC21 section directory CRC mismatch");
     return {h, metadata, directory, locs};
 }
-std::string read21(View file, View name) {
-    auto header = directory21(file);
-    const auto &directory = header.catalog;
-    auto loc = [&](std::uint64_t id) {
-        auto it = header.pages.find(id);
-        check(it != header.pages.end(), "Missing AC21 page");
-        return it->second;
-    };
-    for (std::size_t pos = 0; pos < directory.size();) {
-        auto desc = slice(directory, pos, 64);
-        pos += 64;
-        auto total = number(desc, 0, 8), name_len = number(desc, 32, 8), n = number(desc, 56, 8);
-        auto wide = slice(directory, pos, name_len);
-        pos += name_len;
-        check(n <= (directory.size() - pos) / 56, "Invalid AC21 section descriptor");
-        bool matches = wide.size() >= name.size() * 2 && wide.size() % 2 == 0;
-        for (std::size_t i = 0; matches && i < wide.size() / 2; i++)
-            matches = number(wide, 2 * i, 2) == (i < name.size() ? static_cast<unsigned char>(name[i]) : 0);
-        if (!matches) {
-            pos += n * 56;
+struct SectionView {
+    View desc, entries;
+    bool encrypted;
+};
+constexpr View security_section = "AcDb:Security";
+
+bool section_name_matches(View stored, View name, bool wide) {
+    if (!wide)
+        return stored.substr(0, stored.find('\0')) == name;
+    if (stored.size() % 2 || stored.size() / 2 < name.size())
+        return false;
+    for (std::size_t i = 0; i < stored.size() / 2; ++i)
+        if (number(stored, i * 2, 2) != (i < name.size() ? static_cast<unsigned char>(name[i]) : 0))
+            return false;
+    return true;
+}
+
+std::optional<SectionView> find_section(View catalog, bool ac21, View name, bool *any_encrypted = nullptr) {
+    std::optional<SectionView> result;
+    std::size_t pos = ac21 ? 0 : 20;
+    const auto count = ac21 ? 0 : number(catalog, 0);
+    const std::size_t descriptor_size = ac21 ? 64 : 96;
+    const std::size_t page_size = ac21 ? 56 : 16;
+    for (std::size_t i = 0; ac21 ? pos < catalog.size() : i < count; ++i) {
+        const auto desc = slice(catalog, pos, descriptor_size);
+        pos += descriptor_size;
+        const auto stored_name = ac21 ? slice(catalog, pos, number(desc, 32, 8)) : desc.substr(32, 64);
+        if (ac21)
+            pos += stored_name.size();
+        const auto pages = ac21 ? number(desc, 56, 8) : number(desc, 8);
+        check(pages <= (catalog.size() - pos) / page_size, "Truncated DWG page descriptors");
+        const auto entries = slice(catalog, pos, pages * page_size);
+        pos += entries.size();
+        const bool encrypted = (ac21 ? number(desc, 16, 8) : number(desc, 28)) != 0;
+        if (any_encrypted && encrypted)
+            *any_encrypted = true;
+        if (!section_name_matches(stored_name, name, ac21))
             continue;
+        check(!result, "Duplicate DWG security section");
+        result = SectionView{desc, entries, encrypted};
+        if (!any_encrypted)
+            break;
+    }
+    return result;
+}
+
+bool protected_catalog(View catalog, bool ac21) {
+    bool any_encrypted = false;
+    const auto security = find_section(catalog, ac21, security_section, &any_encrypted);
+    return security.has_value() || any_encrypted;
+}
+
+std::string read21(View file, const Directory21 &directory, const SectionView &section,
+                   const detail::DwgCipherKey *key) {
+    const auto total = number(section.desc, 0, 8);
+    check(total <= 1024ULL * 1024 * 1024, "Oversized AC21 section");
+    std::string result;
+    for (std::size_t pos = 0; pos < section.entries.size(); pos += 56) {
+        const auto record = slice(section.entries, pos, 56);
+        const auto page = directory.pages.find(number(record, 16, 8));
+        check(page != directory.pages.end(), "Missing AC21 page");
+        const auto physical = page->second;
+        const auto size = number(record, 24, 8), comp = number(record, 32, 8);
+        check(size <= 4 * 1024 * 1024 && result.size() <= total, "Invalid AC21 logical page");
+        std::string bytes;
+        if (number(section.desc, 48, 8) == 1) {
+            bytes = slice(slice(file, physical.offset, physical.size), 0, size);
+            if (key)
+                detail::decrypt_dwg_page(bytes, *key);
+        } else {
+            bytes = page21(slice(file, physical.offset, physical.size), 0, comp, size, 1, 251,
+                           number(record, 48, 8), number(directory.metadata, 240, 8), key);
         }
-        check(!number(desc, 16, 8) && total <= 1024ULL * 1024 * 1024, "Encrypted or oversized AC21 section");
-        std::string result;
-        for (std::size_t j = 0; j < n; j++, pos += 56) {
-            auto record = slice(directory, pos, 56);
-            auto physical = loc(number(record, 16, 8));
-            auto size = number(record, 24, 8), comp = number(record, 32, 8);
-            check(size <= 4 * 1024 * 1024 && result.size() <= total, "Invalid AC21 logical page");
-            auto bytes = number(desc, 48, 8) == 1
-                             ? std::string(slice(file, physical.offset, size))
-                             : page21(file, physical.offset, comp, size, 1, 251, number(record, 48, 8),
-                                      number(header.metadata, 240, 8));
-            check(number(record, 0, 8) == result.size(), "Invalid AC21 page offset");
+        check(number(record, 0, 8) == result.size(), "Invalid AC21 page offset");
+        if (!key)
             check(adler(static_cast<std::uint32_t>(size * 0x343fd + 0x269ec3), reordered_crc_input(bytes)) ==
                       number(record, 40, 8),
                   "AC21 data page checksum mismatch");
-            result.append(bytes, 0, std::min<std::size_t>(size, total - result.size()));
-        }
-        check(result.size() == total, "Incomplete AC21 section");
-        return result;
+        result.append(bytes, 0, std::min<std::size_t>(size, total - result.size()));
     }
-    throw std::invalid_argument("DWG section not found");
+    check(result.size() == total, "Incomplete AC21 section");
+    return result;
 }
-} // namespace
 
-namespace {
 struct Directory18 {
     std::string inner, catalog;
     std::map<unsigned, PhysicalPage> pages;
@@ -384,57 +427,95 @@ Directory18 directory18(View file) {
     auto catalog = system_page(file, catalog_page->second.offset, 0x4163003b);
     return {inner, catalog, pages};
 }
-} // namespace
-std::string read_dwg_paged_section(View file, View name) {
-    if (file.substr(0, 6) == "AC1021")
-        return read21(file, name);
-    auto directory = directory18(file);
-    auto &catalog = directory.catalog;
-    auto &pages = directory.pages;
-    auto count = number(catalog, 0);
-    std::size_t pos = 20;
-    for (std::size_t i = 0; i < count; i++) {
-        auto desc = slice(catalog, pos, 96);
-        pos += 96;
-        auto total = number(desc, 0, 8), n = number(desc, 8), capacity = number(desc, 12);
-        auto section_name = desc.substr(32, 64);
-        section_name = section_name.substr(0, section_name.find('\0'));
-        check(n <= (catalog.size() - pos) / 16, "Truncated DWG page descriptors");
-        if (section_name != name) {
-            pos += 16 * n;
-            continue;
-        }
-        check(!number(desc, 28), "Encrypted DWG section");
-        check(capacity <= 4 * 1024 * 1024 && total <= 1024ULL * 1024 * 1024,
-              "DWG section size exceeds limit");
-        std::string out;
-        for (std::size_t j = 0; j < n; j++, pos += 16) {
-            auto page = pages.find(number(catalog, pos));
-            check(page != pages.end(), "Missing DWG data page");
-            auto offset = page->second.offset;
-            auto physical = slice(file, offset, page->second.size);
-            std::string hdr(slice(physical, 0, 32));
-            auto mask = 0x4164536bu ^ static_cast<std::uint32_t>(offset);
-            for (unsigned k = 0; k < 32; k++)
-                hdr[k] ^= static_cast<char>(mask >> (8 * (k % 4)));
-            auto dst = number(hdr, 16, 8), len = number(hdr, 8);
-            check(dst == number(catalog, pos + 8, 8) && len == number(catalog, pos + 4),
-                  "Inconsistent DWG data page descriptor");
-            auto data = slice(physical, 32, len);
-            auto payload_crc = number(hdr, 28), header_crc = number(hdr, 24);
+std::string read18(View file, const Directory18 &directory, const SectionView &section,
+                   const detail::DwgCipherKey *key) {
+    const auto total = number(section.desc, 0, 8), capacity = number(section.desc, 12);
+    check(capacity <= 4 * 1024 * 1024 && total <= 1024ULL * 1024 * 1024, "DWG section size exceeds limit");
+    std::string out;
+    for (std::size_t pos = 0; pos < section.entries.size(); pos += 16) {
+        auto page = directory.pages.find(number(section.entries, pos));
+        check(page != directory.pages.end(), "Missing DWG data page");
+        const auto offset = page->second.offset;
+        const auto physical = slice(file, offset, page->second.size);
+        std::string hdr(slice(physical, 0, 32));
+        auto mask = 0x4164536bu ^ static_cast<std::uint32_t>(offset);
+        for (unsigned k = 0; k < 32; ++k)
+            hdr[k] ^= static_cast<char>(mask >> (8 * (k % 4)));
+        const auto dst = number(hdr, 16, 8), len = number(hdr, 8);
+        check(dst == number(section.entries, pos + 8, 8) && len == number(section.entries, pos + 4),
+              "Inconsistent DWG data page descriptor");
+        auto data = slice(physical, 32, len);
+        std::string decrypted;
+        // The pin skips page checksums for protected data because the coverage is unspecified.
+        if (key) {
+            decrypted = data;
+            detail::decrypt_dwg_page(decrypted, *key);
+            data = decrypted;
+        } else {
+            const auto payload_crc = number(hdr, 28), header_crc = number(hdr, 24);
             hdr.replace(24, 4, 4, 0);
             check(adler(0, data) == payload_crc && adler(payload_crc, hdr) == header_crc,
                   "DWG data page checksum mismatch");
-            auto contents = number(desc, 20) == 2 ? inflate(data, capacity) : std::string(data);
-            check(dst <= total && dst >= out.size(), "Invalid DWG data page placement");
-            out.resize(dst, 0);
-            out.append(contents, 0, std::min<std::size_t>(contents.size(), total - dst));
         }
-        check(total == 0 || total <= out.size() + capacity, "Invalid DWG section extent");
-        out.resize(total, 0);
-        return out;
+        auto contents = number(section.desc, 20) == 2 ? inflate(data, capacity) : std::string(data);
+        check(dst <= total && dst >= out.size(), "Invalid DWG data page placement");
+        out.resize(dst, 0);
+        out.append(contents, 0, std::min<std::size_t>(contents.size(), total - dst));
     }
-    throw std::invalid_argument("DWG section not found");
+    check(total == 0 || total <= out.size() + capacity, "Invalid DWG section extent");
+    out.resize(total, 0);
+    return out;
+}
+} // namespace
+
+struct detail::DwgPagedReader::Impl {
+    using Directory = std::variant<Directory18, Directory21>;
+    explicit Impl(View bytes)
+        : file(bytes), directory(bytes.substr(0, 6) == "AC1021" ? Directory(directory21(bytes))
+                                                              : Directory(directory18(bytes))) {}
+
+    bool is_ac21() const { return std::holds_alternative<Directory21>(directory); }
+    View catalog() const {
+        return std::visit([](const auto &value) -> View { return value.catalog; }, directory);
+    }
+    std::string extract(const SectionView &section) const {
+        check(!section.encrypted || key.has_value(), "Encrypted DWG section requires a verified password");
+        const auto *cipher = section.encrypted ? &*key : nullptr;
+        if (const auto *ac21 = std::get_if<Directory21>(&directory))
+            return read21(file, *ac21, section, cipher);
+        return read18(file, std::get<Directory18>(directory), section, cipher);
+    }
+
+    View file;
+    Directory directory;
+    std::optional<DwgCipherKey> key;
+    bool protected_file = false;
+};
+
+detail::DwgPagedReader::DwgPagedReader(View file) : impl_(std::make_unique<Impl>(file)) {}
+detail::DwgPagedReader::~DwgPagedReader() = default;
+
+void detail::DwgPagedReader::authenticate(std::optional<View> password) {
+    impl_->key.reset();
+    bool any_encrypted = false;
+    auto security = find_section(impl_->catalog(), impl_->is_ac21(), security_section, &any_encrypted);
+    impl_->protected_file = any_encrypted || security.has_value();
+    if (!impl_->protected_file)
+        return;
+    check(security && !security->encrypted, "Missing or encrypted AcDb:Security section");
+    impl_->key = verify_dwg_password(impl_->extract(*security), password);
+}
+
+bool detail::DwgPagedReader::password_protected() const { return impl_->protected_file; }
+
+std::string detail::DwgPagedReader::read(View name) const {
+    auto section = find_section(impl_->catalog(), impl_->is_ac21(), name);
+    check(section.has_value(), "DWG section not found");
+    return impl_->extract(*section);
+}
+
+std::string read_dwg_paged_section(View file, View name) {
+    return detail::DwgPagedReader(file).read(name);
 }
 namespace {
 void put(std::string &s, std::size_t pos, std::uint64_t value, unsigned width = 4) {
@@ -484,7 +565,7 @@ void relocate_preview(std::string &data, std::size_t from, std::size_t to) {
 std::string detail::replace_ac18_sections(View file, const std::map<std::string, std::string> &replacements) {
     auto directory = directory18(file);
     auto &catalog = directory.catalog;
-    check(!number(file, 24), "Secured DWG rewrite unsupported");
+    check(!number(file, 24) && !protected_catalog(catalog, false), "Secured DWG rewrite unsupported");
     std::string out(slice(file, 0, 256));
     auto count = number(catalog, 0);
     // The modeler writer may create the datastore on its first nonempty body.
@@ -710,8 +791,8 @@ std::string system21(View data) {
 std::string detail::replace_ac21_sections(View file, const std::map<std::string, std::string> &changes) {
     auto header = directory21(file);
     auto &meta = header.metadata;
-    check(!number(file, 24), "Secured AC21 rewrite unsupported");
     auto &catalog = header.catalog;
+    check(!number(file, 24) && !protected_catalog(catalog, true), "Secured AC21 rewrite unsupported");
     auto crc_seed = number(meta, 30 * 8, 8);
     std::string out(slice(file, 0, 1152)), map, new_catalog;
     unsigned id = 0, found = 0;

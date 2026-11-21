@@ -1,4 +1,7 @@
 mod dwg_sat_integrity;
+mod dwg_recover;
+mod dwg_password;
+mod dwg_mmap;
 mod dwg_review_regressions;
 mod dwg_history;
 mod dwg_history_author;
@@ -273,6 +276,9 @@ fn verify_gbk(before: &str, after: &str) -> acadrust::Result<()> {
 fn main() -> acadrust::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.as_slice() {
+        [m,v,p] if m=="verify-dwg-password" => dwg_password::verify(v,p),
+        [m,v,p] if m=="verify-dwg-mmap" => dwg_mmap::verify(v,p),
+        [m,v,p] if m=="verify-dwg-recover" => dwg_recover::verify(v,p),
         [m,v,p] if m=="generate-dwg-layer-boundary" => dwg_families::layer_seed_fixture(v,p),
         [m,v,p] if m=="generate-dwg-shared" => dwg_families::shared_fixture(v,p),
         [m,v,p] if m=="generate-dwg-text-style-boundary" => dwg_families::text_style_boundary(v,p),

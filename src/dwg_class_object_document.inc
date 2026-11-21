@@ -21,7 +21,7 @@ void DwgDocument::update_class_object(const ClassObject &object) {
         throw std::invalid_argument("Class object name mismatch");
     if (current->handle != object.handle)
         throw std::invalid_argument("Class object handle mismatch");
-    *this = DwgDocument(detail::edit_dwg_class_objects(bytes_, objects_, {object}));
+    *this = DwgDocument(detail::edit_dwg_class_objects(source_bytes(), objects_, {object}));
 }
 std::uint64_t DwgDocument::insert_class_object(ClassObject object) {
     if (object.handle && objects_.class_objects.count(object.handle)) {
@@ -29,7 +29,7 @@ std::uint64_t DwgDocument::insert_class_object(ClassObject object) {
         return object.handle;
     }
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_class_object(bytes_, objects_, std::move(object), id));
+    *this = DwgDocument(detail::add_dwg_class_object(source_bytes(), objects_, std::move(object), id));
     return id;
 }
 void DwgDocument::remap_class_object_handles(const std::unordered_map<std::uint64_t, std::uint64_t> &map) {
@@ -41,7 +41,7 @@ void DwgDocument::remap_class_object_handles(const std::unordered_map<std::uint6
     }
     if (objects.empty())
         return;
-    *this = DwgDocument(detail::edit_dwg_class_objects(bytes_, objects_, objects));
+    *this = DwgDocument(detail::edit_dwg_class_objects(source_bytes(), objects_, objects));
 }
 namespace {
 std::optional<ObjectDataTable> dwg_document_object_data_table(const DwgR2000Objects &o, std::uint64_t handle) {
@@ -100,13 +100,13 @@ std::vector<std::pair<std::uint64_t, ObjectDataTable>> DwgDocument::object_data_
 }
 std::uint64_t DwgDocument::add_object_data_table(const ObjectDataTable &table) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_object_data_table(bytes_, objects_, table, id));
+    *this = DwgDocument(detail::add_dwg_object_data_table(source_bytes(), objects_, table, id));
     return id;
 }
 std::uint64_t DwgDocument::attach_object_data(std::uint64_t entity, std::uint64_t table,
                                              const std::vector<ObjectDataValue> &values) {
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::attach_dwg_object_data(bytes_, objects_, entity, table, values, id));
+    *this = DwgDocument(detail::attach_dwg_object_data(source_bytes(), objects_, entity, table, values, id));
     return id;
 }
 std::vector<ObjectDataAttachment> DwgDocument::object_data(std::uint64_t entity) const {

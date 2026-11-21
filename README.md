@@ -2,7 +2,7 @@
 
 **A native C++17 library for reading, editing, and creating DXF drawings.**
 
-LibOpenCad is an incremental port of the Rust [acadrust](https://github.com/hakanaktt/acadrust) library. It brings CAD file processing to C++ applications without requiring an installed CAD application. The library uses C++ and iconv; Rust is used only for reference tests during development.
+LibOpenCad is an incremental port of the Rust [acadrust](https://github.com/hakanaktt/acadrust) library. It brings CAD file processing to C++ applications without requiring an installed CAD application. The library uses C++, iconv and zlib. Rust is used for reference tests during development. See [Build and distribute the SDK](#build-and-distribute-the-sdk) for third-party integration.
 
 The project is licensed under [MPL-2.0](LICENSE). It is in early development, with basic ASCII and binary DXF I/O and document operations available. It does not yet cover the full upstream feature set. The native DWG reader supports LINE, CIRCLE, ARC and TEXT across the nine release signatures from AC1009 to AC1032. It exposes symbol names, object handles, block membership and layout references. The DWG document API uses the same LINE, CIRCLE, ARC and TEXT types as the DXF document. It edits geometry and assigns an existing layer while preserving handles and ownership. New drawings can contain LINE, CIRCLE, ARC and TEXT in model and paper space on layer 0. Creation uses release-specific empty document defaults compiled into the library. [DWG document editing](include/libopencad/dwg_document.hpp) · [DWG records and bit streams](include/libopencad/dwg_r2000.hpp) · [DWG creation](include/libopencad/dwg_create.hpp)
 
@@ -163,51 +163,84 @@ Thickness accepts finite positive, negative and zero values. Normals retain thei
 
 Empty strings and length-changing updates are supported, including AC1009 relocation into its extra entity stream. Formatting-only updates retain the original encoded string. Invalid UTF-8, embedded NUL, non-finite numbers, invalid alignment values and oversized records reject the update without changing the document. A combined text, position, format and style update is atomic.
 
+### DWG Read Statistics and Recovery
+
+`DwgDocument::read_with_stats(input)` returns the document and `DwgReadStatistics`, including the source version, record stream counts, output counts, and diagnostics. A clean read preserves the original bytes. Set `DwgReadOptions::failsafe` to inspect the records that survived decoding. A failsafe outcome with `writable == false` exposes those records for inspection. Strict decoding errors carry the available statistics in `DwgReadError::stats()`.
+
+```cpp
+libopencad::DwgReadOptions options;
+options.failsafe = true;
+auto read = libopencad::DwgDocument::read_with_stats(input, options);
+auto skipped = read.stats.skipped_source_records;
+```
+
+For R13 and later, `decoded_source_records` includes the mapped records whose framing and native decoders succeeded, including records retained as opaque. `output_records()` sums the entity, object, and table record counts. The AC1009 output counts reflect the native drawing and its physical table rows.
+
+For an AutoCAD 2004 or later drawing protected with the `AcDb:Security` password verifier, pass the UTF-8 password as `DwgReadOptions::password`. `read`, `read_with_stats`, `from_mmap`, and `recover` accept the option. Strict statistics reads report missing or incorrect passwords as `decryption-failed`. Failsafe reading reports the failure and can inspect any unencrypted sections the file contains. An authenticated, writable document can copy the original encrypted file bytes through `write()`.
+
+`DwgDocument::from_mmap(path, options)` accepts a filesystem path on POSIX and Windows and returns the same `DwgReadOutcome` as `read_with_stats`. It decodes from a read-only mapping. The document and its copies keep the mapping alive for byte-preserving output. Keep the source file unchanged for that lifetime and save edits to a separate file. File-open and mapping failures surface as `DwgReadError`.
+
+`DwgDocument::recover(input)` returns the recovered document, read statistics, and a before/after repair report. On R13 and later it uses the handle map to isolate corrupt records and repair block membership where the surviving references identify the repair. The AC1009 reader validates the legacy entity stream as a unit.
+
+```cpp
+auto recovered = libopencad::DwgDocument::recover(input);
+if (recovered.writable)
+    recovered.document.write(output);
+```
+
+`stats.diagnostics` reports skipped handles and identifies whether their offsets refer to file bytes or the decompressed object section. `DwgRecoveryError::stats()` supplies the diagnostics when no usable drawing survives. A usable document may be available for inspection with `writable == false` when the container cannot be rebuilt safely. Read-only recovery retains access to the surviving native records through `document.objects()`.
+
 ## Quick Start
 
 ### Requirements
 
-- A C++17 compiler.
-- CMake 3.16 or later.
-- iconv, provided by the system or installed as libiconv. CMake discovers it through `FindIconv`.
-- Optional: Rust and Cargo for upstream interoperability tests.
+Building the SDK requires a C++17 compiler, CMake 3.16 or later, and development files for iconv and zlib. With Apple libc++, the floating-point `std::from_chars` overload used by the library requires a macOS 26.0 or later deployment target. Rust and Cargo are optional tools for upstream interoperability tests.
 
-Build the library from the repository root:
+### Build and distribute the SDK
 
-```sh
-cmake -S . -B build -DBUILD_TESTING=OFF
-cmake --build build --parallel
-```
-
-Install a prefix and consume it with `find_package(LibOpenCad)` (CMake package version 0.1.0):
+From the repository root, build the shared library and install the SDK into a local directory:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
-cmake --build build --parallel
-cmake --install build --prefix /usr/local
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TESTING=OFF
+cmake --build build --config Release --parallel
+cmake --install build --config Release --prefix "$PWD/build/sdk"
+cmake --build build --config Release --target package
 ```
+
+The ZIP in `build/` contains the compiled library, public headers, CMake package, license notices and a buildable example. Distribute the ZIP built for the consumer's OS, architecture and compatible C++ ABI. The shared build uses the platform's iconv and zlib runtimes. On Windows, make the SDK's `bin` directory and any dependency DLLs available to the executable. For static linking, configure a separate build with `-DBUILD_SHARED_LIBS=OFF`. The static package locates iconv and zlib development files when the application configures.
+
+### Link from a third-party project
+
+Point CMake at the installed or extracted SDK root (the directory containing `include/`). Application code includes headers such as `<libopencad/dxf_document.hpp>`.
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
 project(cad_example LANGUAGES CXX)
-find_package(LibOpenCad REQUIRED)
+find_package(LibOpenCad 0.1 CONFIG REQUIRED)
 add_executable(cad_example main.cpp)
 target_link_libraries(cad_example PRIVATE LibOpenCad::libopencad)
 ```
 
-Source integration remains supported. Place this repository in your application's `LibOpenCad/` directory:
+For a host application that loads plugins, implement the host's entry point in `extension.cpp` and link the SDK target into the module. Select the static SDK prefix to include LibOpenCad in the plugin binary, or the shared SDK prefix to load the LibOpenCad runtime separately.
 
 ```cmake
-cmake_minimum_required(VERSION 3.16)
-project(cad_example LANGUAGES CXX)
-
-set(BUILD_TESTING OFF CACHE BOOL "Build dependency tests")
-add_subdirectory(LibOpenCad)
-add_executable(cad_example main.cpp)
-target_link_libraries(cad_example PRIVATE libopencad) # or LibOpenCad::libopencad
+find_package(LibOpenCad 0.1 CONFIG REQUIRED)
+add_library(cad_extension MODULE extension.cpp)
+target_link_libraries(cad_extension PRIVATE LibOpenCad::libopencad)
 ```
 
-A standalone sample lives in [examples/create_drawing.cpp](examples/create_drawing.cpp).
+The macOS static SDK includes a [buildable plugin and host](examples/macos_static_plugin/README.md) that write a DWG and verify its geometry after reopening it.
+
+To run the example shipped in the SDK on macOS or Linux, use the default installation layout:
+
+```sh
+sdk="$PWD/build/sdk"
+cmake -S "$sdk/share/doc/LibOpenCad/examples" -B build/consumer -DCMAKE_PREFIX_PATH="$sdk" -DCMAKE_BUILD_TYPE=Release
+cmake --build build/consumer --config Release
+(cd build/consumer && ctest -C Release --output-on-failure)
+```
+
+The example writes `build/consumer/drawing.dxf`. For a deployed application, install the shared library where its runtime loader searches. A source-based application can instead use the same target with `add_subdirectory(LibOpenCad)`. Embedded builds skip the library's tests by default and preserve the parent project's test settings.
 
 ### Create a Drawing
 
@@ -385,7 +418,7 @@ drawing.set_sheet_set_data(data);
 
 ### Fields
 
-`<libopencad/fields.hpp>` ports acadrust `fields` evaluation for DIESEL, `AcVar`, `_text` children, sheet-set placeholders, COUNT, `AcExpr` and constructible `AcObjProp` (including INSERT `InsUnits` / Effective scale, Material flags, and versioned `AcObjProp.*` UCS points). `FieldContext` is host-supplied (`now_julian` is required). Unknown evaluators return no value and keep the cached field text. `AcExpr` invalid results are `####`. Nonempty `\f` pictures use rust `Picture` / `format_number` (`%lu`, `%pr`, `%bl`, …); empty pictures stay six decimals. `cell_field_text` evaluates a table-owned FIELD. `inline_code` expands `%<_FldIdx n>%` children; `field_spans` returns UTF-8 ranges of filled children. `DxfDocument::set_table_cell_field` / `remove_table_cell_field` / `update_table_cell_fields` / `refresh_table_block` / `build_table_block` author table cells and regenerate the anonymous `*T` block. `set_text_field` / `remove_text_field` / `update_fields` / `stamp_plot_fields` attach FIELD objects to MTEXT/TEXT/ATTDEF/ATTRIB hosts. `attach_attribute_fields` copies ATTDEF fields onto INSERT ATTRIB. `orphan_table_fields` / `prune_table_fields` / `remove_fields` drop leftover table-owned FIELD objects. `create_group` / `create_unnamed_group` / `add_entity_to_group` / `remove_entity_from_group` / `remove_group` register `GROUP` objects in NOD `ACAD_GROUP` and keep entity `{ACAD_REACTORS}` in sync. `DxfDocument::recover` is rust `DxfReader::recover` (failsafe read, usability gate, then `repair()`). `mesh_texture_coordinates`, `set_layer_viewport_override` and `viewport_annotation_scale` store Autodesk XRecords on the mesh, layer or viewport extension dictionary. `begin_entity_change_recording` snapshots first-touch entity type names. `prepare_table_recompose_data()` writes NOD `ACDB_RECOMPOSE_DATA` explicitly; ordinary `write()` does not. Data-link objects remain typed ClassObject storage; there is no spreadsheet engine. See [native tests](tests/stage7_remaining.cpp) and [tests/upstream/local-stage7-remaining](tests/upstream/local-stage7-remaining).
+`<libopencad/fields.hpp>` ports acadrust `fields` evaluation for DIESEL, `AcVar`, `_text` children, sheet-set placeholders, COUNT, `AcExpr` and constructible `AcObjProp` (including INSERT `InsUnits` / Effective scale, Material flags, and versioned `AcObjProp.*` UCS points). `FieldContext` is host-supplied (`now_julian` is required). Unknown evaluators return no value and keep the cached field text. `AcExpr` invalid results are `####`. Nonempty `\f` pictures use rust `Picture` / `format_number` (`%lu`, `%pr`, `%bl`, …); empty pictures stay six decimals. `cell_field_text` evaluates a table-owned FIELD. `inline_code` expands `%<_FldIdx n>%` children; `field_spans` returns UTF-8 ranges of filled children. `DxfDocument::set_table_cell_field` / `remove_table_cell_field` / `update_table_cell_fields` / `refresh_table_block` / `build_table_block` author table cells and regenerate the anonymous `*T` block. `set_text_field` / `remove_text_field` / `update_fields` / `stamp_plot_fields` attach FIELD objects to MTEXT/TEXT/ATTDEF/ATTRIB hosts. `attach_attribute_fields` copies ATTDEF fields onto INSERT ATTRIB. `orphan_table_fields` / `prune_table_fields` / `remove_fields` drop leftover table-owned FIELD objects. `create_group` / `create_unnamed_group` / `add_entity_to_group` / `remove_entity_from_group` / `remove_group` register `GROUP` objects in NOD `ACAD_GROUP` and keep entity `{ACAD_REACTORS}` in sync. `DxfDocument::recover` is rust `DxfReader::recover` (failsafe read, usability gate, then `repair()`). `mesh_texture_coordinates`, `set_layer_viewport_override` and `viewport_annotation_scale` store Autodesk XRecords on the mesh, layer or viewport extension dictionary. `begin_entity_change_recording` snapshots first-touch entity type names. DXF `write()` refreshes the named object dictionary’s `ACDB_RECOMPOSE_DATA` entry on the output copy. It lists table styles with linked cell-style maps and tables with a linked round-trip record. Use `prepare_table_recompose_data()` to apply the same update in memory. Data-link objects remain typed ClassObject storage; there is no spreadsheet engine. See [native tests](tests/stage7_remaining.cpp) and [tests/upstream/local-stage7-remaining](tests/upstream/local-stage7-remaining).
 
 ```cpp
 #include <libopencad/dxf_document.hpp>
@@ -769,7 +802,7 @@ The version API recognizes `AC1009`, `AC1012`, `AC1014`, `AC1015`, `AC1018`, `AC
 
 New documents currently use AC1032 (AutoCAD 2018 format). Ordinary saves retain the source version. Dedicated R12 ASCII export and controlled R13–R2018 target conversion are available for the documented scopes below. Creating ELLIPSE, RAY, or XLINE is restricted to R13 or later; adding an LWPOLYLINE requires R14 or later.
 
-Missing or incomplete areas include DWG editing beyond the documented primitives, comprehensive version conversion, entity transforms/explode and geometry generation, complete dynamic-block action evaluation, associative constraint solving, leftover AEC/Arch constructors beyond wall/door/window and sample-drawing stair/member success paths, complete ACIS/modeler integration, remaining SpatialIndex ClassObject families, table-style recompose, and rendering. Stored block, layout and viewport edits do not regenerate CAD display geometry. Generic registered-class properties are an editable DXF value interface, not complete semantic implementations of those specialized models; embedded group-101 payloads require their dedicated typed interface or raw preservation. Reference checks are not a comprehensive CAD audit and repair system.
+Missing or incomplete areas include DWG editing beyond the documented primitives, comprehensive version conversion, entity transforms/explode and geometry generation, complete dynamic-block action evaluation, associative constraint solving, leftover AEC/Arch constructors beyond wall/door/window and sample-drawing stair/member success paths, complete ACIS/modeler integration, remaining SpatialIndex ClassObject families, and rendering. Stored block, layout and viewport edits do not regenerate CAD display geometry. Generic registered-class properties are an editable DXF value interface, not complete semantic implementations of those specialized models; embedded group-101 payloads require their dedicated typed interface or raw preservation. Reference checks are not a comprehensive CAD audit and repair system.
 
 Interoperability tests identify pinned-upstream limitations explicitly. Examples include omitted polyline metadata and common material/graphics fields, photometric LIGHT writer issues, and procedural material packet ordering. Native tests check fields that Rust drops; passing those checks is not reported as Rust semantic verification. Creating advanced definitions is conservatively gated by DXF version, usually R2007–R2013 or later.
 
@@ -880,7 +913,7 @@ ctest --test-dir build --output-on-failure
 
 The first run needs network access to fetch the [locked Cargo dependencies](tests/upstream/Cargo.lock). Once they are cached, run `CARGO_NET_OFFLINE=true ctest --test-dir build --output-on-failure` for offline verification. Generated drawings and test results go into the build directory; source fixtures are in [tests/data](tests/data).
 
-The current suite has passed **568 CTest checks**, including 300 native cases and 268 Rust reference checks. The upstream synchronization also passed 46 focused native checks under AddressSanitizer and UndefinedBehaviorSanitizer. These results cover the repository's test cases and do not guarantee compatibility with arbitrary CAD files.
+The native suite includes an SDK integration check that moves the installed prefix, builds the shipped example in a separate project, and runs it to create a drawing. Run `ctest -N` in the build directory to list the checks enabled for your configuration.
 
 ## Upstream and Contributing
 

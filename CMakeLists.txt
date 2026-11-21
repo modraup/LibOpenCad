@@ -15,7 +15,7 @@ endforeach()
 configure_file(src/dwg_defaults.inc.in "${CMAKE_CURRENT_BINARY_DIR}/dwg_defaults.inc" @ONLY)
 find_package(Iconv REQUIRED)
 find_package(ZLIB REQUIRED)
-add_library(libopencad src/dwg_sat.cpp src/acis.cpp src/acis_spline.cpp src/acis_spline_builder.cpp src/acis_sat.cpp src/acis_sab.cpp src/acis_builder.cpp src/acis_primitives.cpp src/acis_planar.cpp src/embedded_profile.cpp src/history_profiles.cpp src/solid_history.cpp src/dynamic_block.cpp src/associative.cpp src/arch.cpp src/extended_geometry.cpp src/extended_entity_transform.cpp src/table_transform.cpp src/viewport_transform.cpp src/raster_transform.cpp src/shape_underlay_transform.cpp src/hatch_transform.cpp src/dimension_geometry.cpp src/entity_annotation_transform.cpp src/entity_text_transform.cpp src/import.cpp src/import_obj.cpp src/import_collada.cpp src/import_gltf.cpp src/import_fbx.cpp src/mesh.cpp src/entity_transform.cpp src/geometry.cpp src/dwg_document.cpp src/dwg_preview.cpp src/dwg_acds.cpp src/dwg_sections.cpp src/dwg_r2000.cpp src/dxf_approximation.cpp src/dxf_hatch_approximation.cpp src/dxf_convert.cpp src/hatch.cpp src/dxf_r12.cpp src/dxf_read.cpp src/proxy_graphics.cpp src/mtext_format.cpp src/color.cpp src/vector.cpp src/transform.cpp src/object_data.cpp src/dxf_document.cpp src/dxf_binary.cpp src/dxf_code_page.cpp src/plot_style.cpp src/sheet_set.cpp src/notification.cpp src/nested_copy.cpp src/count.cpp src/fields.cpp src/vba.cpp src/compound_file.cpp)
+add_library(libopencad src/dwg_sat.cpp src/acis.cpp src/acis_spline.cpp src/acis_spline_builder.cpp src/acis_sat.cpp src/acis_sab.cpp src/acis_builder.cpp src/acis_primitives.cpp src/acis_planar.cpp src/embedded_profile.cpp src/history_profiles.cpp src/solid_history.cpp src/dynamic_block.cpp src/associative.cpp src/arch.cpp src/extended_geometry.cpp src/extended_entity_transform.cpp src/table_transform.cpp src/viewport_transform.cpp src/raster_transform.cpp src/shape_underlay_transform.cpp src/hatch_transform.cpp src/dimension_geometry.cpp src/entity_annotation_transform.cpp src/entity_text_transform.cpp src/import.cpp src/import_obj.cpp src/import_collada.cpp src/import_gltf.cpp src/import_fbx.cpp src/mesh.cpp src/entity_transform.cpp src/geometry.cpp src/dwg_document.cpp src/dwg_mapped_file.cpp src/dwg_preview.cpp src/dwg_acds.cpp src/dwg_security.cpp src/dwg_sections.cpp src/dwg_r2000.cpp src/dxf_approximation.cpp src/dxf_hatch_approximation.cpp src/dxf_convert.cpp src/hatch.cpp src/dxf_r12.cpp src/dxf_read.cpp src/proxy_graphics.cpp src/mtext_format.cpp src/color.cpp src/vector.cpp src/transform.cpp src/object_data.cpp src/dxf_document.cpp src/dxf_binary.cpp src/dxf_code_page.cpp src/plot_style.cpp src/sheet_set.cpp src/notification.cpp src/nested_copy.cpp src/count.cpp src/fields.cpp src/vba.cpp src/compound_file.cpp)
 # Match Rust rounding for vector and matrix products.
 if(MSVC)
     set_source_files_properties(src/acis.cpp src/acis_spline.cpp src/acis_spline_builder.cpp src/acis_sat.cpp src/acis_sab.cpp src/acis_builder.cpp src/acis_primitives.cpp src/acis_planar.cpp src/embedded_profile.cpp src/history_profiles.cpp src/solid_history.cpp src/dynamic_block.cpp src/vector.cpp src/transform.cpp src/geometry.cpp src/entity_transform.cpp src/import.cpp src/import_obj.cpp src/import_collada.cpp src/import_gltf.cpp src/import_fbx.cpp src/mesh.cpp src/entity_text_transform.cpp src/entity_annotation_transform.cpp src/dimension_geometry.cpp src/hatch_transform.cpp src/shape_underlay_transform.cpp src/raster_transform.cpp src/viewport_transform.cpp src/table_transform.cpp src/extended_entity_transform.cpp src/extended_geometry.cpp PROPERTIES COMPILE_OPTIONS "/fp:strict")
@@ -30,27 +30,37 @@ target_include_directories(libopencad
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}")
-# Keep imported deps out of the installed export set; Config.cmake reattaches them.
-target_link_libraries(libopencad PUBLIC
-    $<BUILD_INTERFACE:Iconv::Iconv>
-    $<BUILD_INTERFACE:ZLIB::ZLIB>)
+target_link_libraries(libopencad PRIVATE Iconv::Iconv ZLIB::ZLIB)
 target_compile_features(libopencad PUBLIC cxx_std_17)
 add_library(LibOpenCad::libopencad ALIAS libopencad)
-set_target_properties(libopencad PROPERTIES EXPORT_NAME libopencad)
+set_target_properties(libopencad PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR})
 
 install(TARGETS libopencad EXPORT LibOpenCadTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
-    INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
-install(DIRECTORY include/libopencad DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(DIRECTORY include/libopencad DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.hpp")
 install(FILES LICENSE THIRD_PARTY_NOTICES.md DESTINATION "${CMAKE_INSTALL_DOCDIR}")
-install(FILES examples/create_drawing.cpp DESTINATION "${CMAKE_INSTALL_DOCDIR}/examples")
-add_executable(example_create_drawing EXCLUDE_FROM_ALL examples/create_drawing.cpp)
-target_link_libraries(example_create_drawing PRIVATE libopencad)
+install(FILES examples/CMakeLists.txt examples/create_drawing.cpp DESTINATION "${CMAKE_INSTALL_DOCDIR}/examples")
 install(EXPORT LibOpenCadTargets
     NAMESPACE LibOpenCad::
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/LibOpenCad")
+get_target_property(libopencad_library_type libopencad TYPE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND libopencad_library_type STREQUAL "STATIC_LIBRARY")
+    install(DIRECTORY examples/macos_static_plugin DESTINATION "${CMAKE_INSTALL_DOCDIR}/examples"
+        FILES_MATCHING PATTERN "CMakeLists.txt" PATTERN "*.cpp" PATTERN "README.md")
+endif()
+if(libopencad_library_type STREQUAL "SHARED_LIBRARY")
+    # Parent applications can hide their own symbols while linking this public API.
+    set_target_properties(libopencad PROPERTIES CXX_VISIBILITY_PRESET default)
+    set(libopencad_needs_link_dependencies 0)
+else()
+    set(libopencad_needs_link_dependencies 1)
+endif()
 configure_package_config_file(
     cmake/LibOpenCadConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/LibOpenCadConfig.cmake"
@@ -64,8 +74,19 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/LibOpenCadConfigVersion.cmake"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/LibOpenCad")
 
-include(CTest)
-if(BUILD_TESTING)
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    add_executable(example_create_drawing EXCLUDE_FROM_ALL examples/create_drawing.cpp)
+    target_link_libraries(example_create_drawing PRIVATE libopencad)
+    set(CPACK_GENERATOR "ZIP")
+    include(CPack)
+    include(CTest)
+    set(libopencad_build_tests ${BUILD_TESTING})
+else()
+    option(LIBOPENCAD_BUILD_TESTS "Build LibOpenCad tests when embedded in a parent project" OFF)
+    set(libopencad_build_tests ${LIBOPENCAD_BUILD_TESTS})
+endif()
+if(libopencad_build_tests)
+    enable_testing()
     add_executable(review_integrity_test tests/review_integrity.cpp)
     target_link_libraries(review_integrity_test PRIVATE libopencad)
     foreach(case IN ITEMS sat acds loft expand)
@@ -98,6 +119,52 @@ if(BUILD_TESTING)
     option(LIBOPENCAD_TEST_UPSTREAM "Verify the saved DXF with pinned acadrust using Cargo" OFF)
     set(LIBOPENCAD_LOCAL_ACADRUST "$ENV{HOME}/Development/GitHub/acadrust" CACHE PATH
         "Local acadrust checkout for later-than-pin oracles (Civil, MTEXT, unused APPIDs, import, layer states, sheet sets, plot styles, Stage 8 drawing variables)")
+    add_executable(dwg_recover_test tests/dwg_recover.cpp)
+    target_link_libraries(dwg_recover_test PRIVATE libopencad)
+    foreach(v IN ITEMS AC1009 AC1012 AC1014 AC1015 AC1018 AC1021 AC1024 AC1027 AC1032)
+        set(recover_prefix "${CMAKE_CURRENT_BINARY_DIR}/dwg-recover-${v}")
+        add_test(NAME dwg_recover_${v} COMMAND dwg_recover_test "${v}" "${recover_prefix}")
+        set_tests_properties(dwg_recover_${v} PROPERTIES FIXTURES_SETUP dwg_recover_${v})
+        if(LIBOPENCAD_TEST_UPSTREAM)
+            add_test(NAME upstream_dwg_recover_${v} COMMAND cargo run --locked
+                --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/tests/upstream/Cargo.toml"
+                --target-dir "${CMAKE_CURRENT_BINARY_DIR}/cargo" -- verify-dwg-recover "${v}" "${recover_prefix}")
+            set_tests_properties(upstream_dwg_recover_${v} PROPERTIES FIXTURES_REQUIRED dwg_recover_${v})
+        endif()
+    endforeach()
+    add_executable(dwg_password_test tests/dwg_password.cpp)
+    target_link_libraries(dwg_password_test PRIVATE libopencad)
+    foreach(v IN ITEMS AC1018 AC1021 AC1032)
+        set(password_fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dwg/security/${v}.dwg")
+        add_test(NAME dwg_password_${v} COMMAND dwg_password_test "${v}" "${password_fixture}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dwg/modeler/AC1032.dwg")
+        if(LIBOPENCAD_TEST_UPSTREAM)
+            add_test(NAME upstream_dwg_password_${v} COMMAND cargo run --locked
+                --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/tests/upstream/Cargo.toml"
+                --target-dir "${CMAKE_CURRENT_BINARY_DIR}/cargo" -- verify-dwg-password "${v}" "${password_fixture}")
+        endif()
+    endforeach()
+    if((WIN32 OR UNIX) AND NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten|WASI")
+        add_executable(dwg_mmap_test tests/dwg_mmap.cpp)
+        target_link_libraries(dwg_mmap_test PRIVATE libopencad)
+        foreach(case IN ITEMS linear modeler AC1018 AC1021 AC1032)
+            if(case STREQUAL "linear")
+                set(mmap_fixture "AC1015.dwg")
+            elseif(case STREQUAL "modeler")
+                set(mmap_fixture "modeler/AC1032.dwg")
+            else()
+                set(mmap_fixture "security/${case}.dwg")
+            endif()
+            set(mmap_fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dwg/${mmap_fixture}")
+            add_test(NAME dwg_mmap_${case} COMMAND dwg_mmap_test "${case}" "${mmap_fixture}"
+                "${CMAKE_CURRENT_BINARY_DIR}/dwg-mmap-empty.dwg")
+            if(LIBOPENCAD_TEST_UPSTREAM)
+                add_test(NAME upstream_dwg_mmap_${case} COMMAND cargo run --locked
+                    --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/tests/upstream/Cargo.toml"
+                    --target-dir "${CMAKE_CURRENT_BINARY_DIR}/cargo" -- verify-dwg-mmap "${case}" "${mmap_fixture}")
+            endif()
+        endforeach()
+    endif()
     add_executable(dwg_sat_integrity_test tests/dwg_sat_integrity.cpp)
     target_link_libraries(dwg_sat_integrity_test PRIVATE libopencad)
     foreach(case IN ITEMS framing encoding embedded)
@@ -766,7 +833,8 @@ if(BUILD_TESTING)
     target_link_libraries(dxf_more_extended_test PRIVATE libopencad)
     foreach(format IN ITEMS ascii binary)
         set(more_extended_prefix "${CMAKE_CURRENT_BINARY_DIR}/more-extended-${format}")
-        set(more_extended_input "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/more-extended-${format}.dxf")
+        # The underscore fixture includes embedded MTEXT. Object-version tests use the variant without it.
+        set(more_extended_input "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/more_extended-${format}.dxf")
         add_test(NAME more_extended_${format} COMMAND dxf_more_extended_test ${format} "${more_extended_input}" "${more_extended_prefix}")
         set_tests_properties(more_extended_${format} PROPERTIES FIXTURES_SETUP more_extended_${format})
         if(LIBOPENCAD_TEST_UPSTREAM)
@@ -2198,9 +2266,14 @@ if(BUILD_TESTING)
     set_tests_properties(stage8_drawing_vars PROPERTIES FIXTURES_SETUP stage8_drawing_vars)
     add_test(NAME stage8_find_package COMMAND "${CMAKE_COMMAND}"
         "-DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
-        "-DPREFIX=${CMAKE_CURRENT_BINARY_DIR}/stage8-prefix"
-        "-DCONSUMER_SRC=${CMAKE_CURRENT_SOURCE_DIR}/tests/stage8_package_consumer"
-        "-DPROBE_SRC=${CMAKE_CURRENT_SOURCE_DIR}/examples/create_drawing.cpp"
+        "-DCACHE_DIR=${CMAKE_BINARY_DIR}"
+        "-DCONFIG=$<CONFIG>"
+        "-DGENERATOR=${CMAKE_GENERATOR}"
+        "-DPLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+        "-DTOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+        "-DEXAMPLE_DIR=${CMAKE_INSTALL_DOCDIR}/examples"
+        "-DPACKAGE_DIR=${CMAKE_INSTALL_LIBDIR}/cmake/LibOpenCad"
+        "-DBIN_DIR=${CMAKE_INSTALL_BINDIR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/stage8_package_check.cmake")
     if(LIBOPENCAD_TEST_UPSTREAM AND EXISTS "${LIBOPENCAD_LOCAL_ACADRUST}/Cargo.toml")
         set(LIBOPENCAD_STAGE8_DRAWING_VARS_ORACLE_SRC

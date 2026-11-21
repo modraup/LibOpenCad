@@ -15,6 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shared: ["ON", "OFF"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,8 +23,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLIBOPENCAD_TEST_UPSTREAM=OFF
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=${{ matrix.shared }} -DBUILD_TESTING=ON -DLIBOPENCAD_TEST_UPSTREAM=OFF
       - name: Build
-        run: cmake --build build --parallel
-      - name: Stage 8 package and drawing-variable tests
-        run: ctest --test-dir build -R '^(stage8_drawing_vars|stage8_find_package)$' --output-on-failure
+        run: cmake --build build --parallel 2
+      - name: Native and installed SDK tests
+        run: ctest --test-dir build --parallel 2 --output-on-failure

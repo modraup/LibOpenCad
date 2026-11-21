@@ -60,7 +60,9 @@ enum class RepairActionKind {
     ReindexEntities,
     RepairBlockOwners,
     ClearAttributeDefinitionFlags,
-    SynchronizeHandleAllocator
+    SynchronizeHandleAllocator,
+    RebuildDwgHandleMap,
+    RemoveInvalidBlockMembers
 };
 struct RepairAction {
     RepairActionKind kind;

@@ -67,31 +67,6 @@ std::vector<std::pair<std::uint64_t, ObjectDataTable>> dwg_object_data_tables(co
             out.push_back({entry.second, std::move(*table)});
     return out;
 }
-std::vector<ObjectDataAttachment> dwg_object_data(const DwgR2000Objects &o, std::uint64_t entity) {
-    auto props = dwg_entity_properties(o, entity);
-    if (!props || !props->extension_dictionary)
-        return {};
-    auto rec = o.metadata_records.find(props->extension_dictionary);
-    if (rec == o.metadata_records.end() || rec->second.type != "DICTIONARY")
-        return {};
-    std::vector<ObjectDataAttachment> out;
-    for (const auto &entry : rec->second.dictionary_entries) {
-        auto found = o.class_objects.find(entry.second);
-        if (found == o.class_objects.end())
-            continue;
-        auto *record = std::get_if<ObjectDataRecord>(&found->second.data);
-        if (!record)
-            continue;
-        auto table = dwg_object_data_table(o, record->table);
-        if (!table)
-            continue;
-        auto values = record->values(table->fields);
-        if (!values)
-            continue;
-        out.push_back({entry.second, record->table, std::move(*values)});
-    }
-    return out;
-}
 std::string encode_object_data_xdictionary(unsigned v, const char *page, std::uint64_t id, std::uint64_t owner,
                                            std::uint64_t xdic, const std::vector<std::uint64_t> &reactors,
                                            const std::vector<std::pair<std::string, std::uint64_t>> &entries) {

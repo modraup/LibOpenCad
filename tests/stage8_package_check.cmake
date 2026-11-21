@@ -1,65 +1,61 @@
-# Install the just-built tree and compile a find_package consumer against it.
-if(NOT DEFINED BUILD_DIR OR NOT DEFINED PREFIX OR NOT DEFINED CONSUMER_SRC OR NOT DEFINED PROBE_SRC)
-    message(FATAL_ERROR "BUILD_DIR, PREFIX, CONSUMER_SRC and PROBE_SRC are required")
+cmake_minimum_required(VERSION 3.16)
+
+function(run)
+    execute_process(COMMAND ${ARGV} RESULT_VARIABLE status)
+    if(NOT status STREQUAL "0")
+        message(FATAL_ERROR "${ARGV} failed (${status})")
+    endif()
+endfunction()
+
+# Use a fresh prefix so a previous installation or drawing cannot mask a failure.
+string(RANDOM LENGTH 12 run_id)
+set(work "${BUILD_DIR}/package-test-${run_id}")
+set(prefix "${work}/relocated sdk")
+set(consumer_build "${work}/application")
+if(CONFIG)
+    set(build_config --config "${CONFIG}")
+    set(test_config -C "${CONFIG}")
 endif()
-execute_process(COMMAND "${CMAKE_COMMAND}" --install "${BUILD_DIR}" --prefix "${PREFIX}"
-    RESULT_VARIABLE status)
-if(status)
-    message(FATAL_ERROR "cmake --install failed (${status})")
+run("${CMAKE_COMMAND}" --install "${BUILD_DIR}" --prefix "${work}/install" ${build_config})
+file(RENAME "${work}/install" "${prefix}")
+
+# Match the producer's ABI, dependency search paths and sanitizer runtimes.
+set(options -G "${GENERATOR}")
+if(PLATFORM)
+    list(APPEND options -A "${PLATFORM}")
 endif()
-set(consumer_build "${PREFIX}/consumer-build")
-# Use the producing compiler and instrumentation settings. In particular, a
-# static ASan/UBSan library requires the consumer to link the same runtimes.
-# Includes and dependencies still come exclusively from the installed package.
-load_cache("${BUILD_DIR}" READ_WITH_PREFIX producer_
-    CMAKE_CXX_COMPILER CMAKE_CXX_FLAGS CMAKE_EXE_LINKER_FLAGS CMAKE_BUILD_TYPE
-    CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_MINSIZEREL
-    CMAKE_EXE_LINKER_FLAGS_DEBUG CMAKE_EXE_LINKER_FLAGS_RELEASE
-    CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO CMAKE_EXE_LINKER_FLAGS_MINSIZEREL)
-set(consumer_options
-    "-DCMAKE_CXX_COMPILER=${producer_CMAKE_CXX_COMPILER}"
-    "-DCMAKE_CXX_FLAGS=${producer_CMAKE_CXX_FLAGS}"
-    "-DCMAKE_EXE_LINKER_FLAGS=${producer_CMAKE_EXE_LINKER_FLAGS}"
-    "-DCMAKE_BUILD_TYPE=${producer_CMAKE_BUILD_TYPE}")
+if(TOOLSET)
+    list(APPEND options -T "${TOOLSET}")
+endif()
+set(settings CMAKE_CXX_COMPILER CMAKE_BUILD_TYPE CMAKE_TOOLCHAIN_FILE CMAKE_PREFIX_PATH
+    CMAKE_OSX_ARCHITECTURES CMAKE_OSX_DEPLOYMENT_TARGET CMAKE_OSX_SYSROOT
+    CMAKE_CXX_FLAGS CMAKE_EXE_LINKER_FLAGS)
 foreach(config IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
-    list(APPEND consumer_options
-        "-DCMAKE_CXX_FLAGS_${config}=${producer_CMAKE_CXX_FLAGS_${config}}"
-        "-DCMAKE_EXE_LINKER_FLAGS_${config}=${producer_CMAKE_EXE_LINKER_FLAGS_${config}}")
+    list(APPEND settings CMAKE_CXX_FLAGS_${config} CMAKE_EXE_LINKER_FLAGS_${config})
 endforeach()
-execute_process(COMMAND "${CMAKE_COMMAND}"
-    -S "${CONSUMER_SRC}"
-    -B "${consumer_build}"
-    "-DCMAKE_PREFIX_PATH=${PREFIX}"
-    "-DPROBE_SRC=${PROBE_SRC}"
-    ${consumer_options}
-    RESULT_VARIABLE status)
+if(NOT DEFINED CACHE_DIR)
+    set(CACHE_DIR "${BUILD_DIR}")
+endif()
+load_cache("${CACHE_DIR}" READ_WITH_PREFIX producer_ ${settings})
+foreach(setting IN LISTS settings)
+    if(DEFINED producer_${setting})
+        string(REPLACE ";" "\\;" value "${producer_${setting}}")
+        list(APPEND options "-D${setting}=${value}")
+    endif()
+endforeach()
+
+execute_process(COMMAND "${CMAKE_COMMAND}" -S "${prefix}/${EXAMPLE_DIR}" -B "${consumer_build}"
+    "-DLibOpenCad_DIR=${prefix}/${PACKAGE_DIR}" ${options} RESULT_VARIABLE status)
 if(status)
-    message(FATAL_ERROR "consumer configure failed (${status})")
+    message(FATAL_ERROR "Consumer configuration failed (${status})")
 endif()
-execute_process(COMMAND "${CMAKE_COMMAND}" --build "${consumer_build}"
-    RESULT_VARIABLE status)
-if(status)
-    message(FATAL_ERROR "consumer build failed (${status})")
+run("${CMAKE_COMMAND}" --build "${consumer_build}" ${build_config})
+if(WIN32)
+    set(ENV{PATH} "${prefix}/${BIN_DIR};$ENV{PATH}")
 endif()
-set(probe "${consumer_build}/stage8_package_probe")
-if(NOT EXISTS "${probe}")
-    set(probe "${consumer_build}/Release/stage8_package_probe")
+execute_process(COMMAND "${CMAKE_CTEST_COMMAND}" ${test_config} --output-on-failure
+    WORKING_DIRECTORY "${consumer_build}" RESULT_VARIABLE status)
+if(status OR NOT EXISTS "${consumer_build}/drawing.dxf")
+    message(FATAL_ERROR "Installed example failed to create drawing.dxf (${status})")
 endif()
-if(NOT EXISTS "${probe}")
-    set(probe "${consumer_build}/Debug/stage8_package_probe")
-endif()
-if(NOT EXISTS "${probe}" AND WIN32)
-    set(probe "${consumer_build}/stage8_package_probe.exe")
-endif()
-if(NOT EXISTS "${probe}")
-    message(FATAL_ERROR "consumer probe executable missing")
-endif()
-execute_process(COMMAND "${probe}"
-    WORKING_DIRECTORY "${PREFIX}"
-    RESULT_VARIABLE status)
-if(status)
-    message(FATAL_ERROR "consumer probe failed (${status})")
-endif()
-if(NOT EXISTS "${PREFIX}/drawing.dxf")
-    message(FATAL_ERROR "consumer probe did not write drawing.dxf")
-endif()
+file(REMOVE_RECURSE "${work}")

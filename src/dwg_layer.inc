@@ -50,8 +50,7 @@ std::size_t seed_position(std::string_view data, unsigned v) {
     }
     return r.position();
 }
-std::string allocate_symbol_handle(std::string_view header, unsigned v, std::uint64_t maximum,
-                                   std::uint64_t &id) {
+std::string_view dwg_header_payload(std::string_view header, unsigned v) {
     constexpr unsigned char sentinel[] = {0xcf, 0x7b, 0x1f, 0x23, 0xfd, 0xde, 0x38, 0xa9,
                                           0x5f, 0x7c, 0x68, 0xb8, 0x4e, 0x6d, 0x33, 0x5f};
     require(header.size() >= 38 && std::memcmp(header.data(), sentinel, sizeof sentinel) == 0,
@@ -59,7 +58,7 @@ std::string allocate_symbol_handle(std::string_view header, unsigned v, std::uin
     auto size = get_u32(header, 16);
     std::size_t start = 20;
     auto valid = [&](std::size_t at) {
-        return at + size + 18 <= header.size() &&
+        return at + 18 <= header.size() && size <= header.size() - at - 18 &&
                crc16(header.substr(16, at + size - 16)) ==
                    (static_cast<unsigned char>(header[at + size]) +
                     (static_cast<unsigned char>(header[at + size + 1]) << 8));
@@ -71,17 +70,25 @@ std::string allocate_symbol_handle(std::string_view header, unsigned v, std::uin
     for (std::size_t i = 0; i < sizeof sentinel; i++)
         require(static_cast<unsigned char>(header[start + size + 2 + i]) == (sentinel[i] ^ 255),
                 "Invalid DWG header end sentinel");
-    auto data = header.substr(start, size);
+    return header.substr(start, size);
+}
+std::string update_symbol_seed(std::string_view header, unsigned v, std::uint64_t maximum,
+                               std::uint64_t &id, bool reserve) {
+    const auto data = dwg_header_payload(header, v);
+    const auto start = static_cast<std::size_t>(data.data() - header.data());
+    const auto size = data.size();
     auto pos = seed_position(data, v);
     DwgBitReader r(data);
     r.seek(pos);
     auto seed = r.handle();
     require(seed.code == 0 && maximum < UINT64_MAX, "Invalid DWG handle seed");
     id = std::max(seed.value, maximum + 1);
-    require(id < UINT64_MAX, "DWG handles exhausted");
+    if (!reserve && id == seed.value)
+        return {};
+    require(!reserve || id < UINT64_MAX, "DWG handles exhausted");
     auto after = r.position();
     DwgBitWriter field;
-    field.absolute_handle(0, id + 1);
+    field.absolute_handle(0, id + (reserve ? 1 : 0));
     DwgBitWriter body;
     r.seek(0);
     if (v >= 1021) {
@@ -99,6 +106,10 @@ std::string allocate_symbol_handle(std::string_view header, unsigned v, std::uin
     set_integer(out, 16, body.bytes().size(), 4);
     set_crc(out, 16, start + body.bytes().size());
     return out;
+}
+std::string allocate_symbol_handle(std::string_view header, unsigned v, std::uint64_t maximum,
+                                   std::uint64_t &id) {
+    return update_symbol_seed(header, v, maximum, id, true);
 }
 void update_aux_seed(std::string &aux, unsigned v, std::uint64_t next) {
     require(aux.size() >= 3 && aux.substr(0, 3) == "\xff\x77\x01", "Invalid DWG auxiliary header");

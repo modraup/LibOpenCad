@@ -50,6 +50,20 @@ pub fn generate(prefix: &str) -> acadrust::Result<()> {
 fn geometry(a: &MText, b: &MText) {
     let mut b = b.clone();
     b.common = a.common.clone();
+    if let (Some(actual), Some(expected)) = (a.dwg_x_direction, b.dwg_x_direction) {
+        // C++ and Rust may round the direction computed from the same angle differently.
+        for (actual, expected) in [
+            (actual.x, expected.x),
+            (actual.y, expected.y),
+            (actual.z, expected.z),
+        ] {
+            assert!(
+                (actual - expected).abs() <= 4. * f64::EPSILON,
+                "MTEXT direction component {actual} differs from {expected}"
+            );
+        }
+        b.dwg_x_direction = Some(actual);
+    }
     assert_eq!(a, &b);
 }
 fn mtext(e: &EntityType) -> &MText {

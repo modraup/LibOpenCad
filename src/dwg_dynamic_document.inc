@@ -207,7 +207,7 @@ const DwgInsert &DwgDocument::insert(std::uint64_t h) const {
 void DwgDocument::update_dynamic_record(const DwgDynamicRecord &record) {
     if (!record.handle || !objects_.dynamic_records.count(record.handle))
         throw std::invalid_argument("Missing dynamic object");
-    *this = DwgDocument(detail::edit_dwg_dynamic_record(bytes_, objects_, record.handle, record));
+    *this = DwgDocument(detail::edit_dwg_dynamic_record(source_bytes(), objects_, record.handle, record));
 }
 std::uint64_t DwgDocument::insert_dynamic_record(DwgDynamicRecord record, std::uint64_t block_or_layout) {
     if (record.handle && objects_.dynamic_records.count(record.handle)) {
@@ -215,7 +215,7 @@ std::uint64_t DwgDocument::insert_dynamic_record(DwgDynamicRecord record, std::u
         return record.handle;
     }
     std::uint64_t id = 0;
-    *this = DwgDocument(detail::add_dwg_dynamic_record(bytes_, objects_, std::move(record), block_or_layout, id));
+    *this = DwgDocument(detail::add_dwg_dynamic_record(source_bytes(), objects_, std::move(record), block_or_layout, id));
     return id;
 }
 std::optional<BlockEvaluationGraph> DwgDocument::dynamic_block_graph(std::uint64_t definition) const {
@@ -257,7 +257,7 @@ std::optional<std::uint64_t> DwgDocument::dynamic_definition_for_insert(std::uin
 std::optional<std::uint64_t> DwgDocument::dynamic_block_definition(std::uint64_t block) const {
     if (is_dynamic_block(block))
         return block;
-    auto v = unsigned(dxf_version_from_string(std::string_view(bytes_).substr(0, 6)));
+    auto v = unsigned(dxf_version_from_string(source_bytes().substr(0, 6)));
     auto eed = objects_.eed.find(block);
     if (eed != objects_.eed.end()) {
         for (auto &item : eed->second) {
@@ -327,8 +327,8 @@ DwgDocument::dynamic_block_properties(std::uint64_t definition, std::optional<st
     auto graph = dynamic_block_graph(definition);
     if (!graph)
         return {};
-    auto v = unsigned(dxf_version_from_string(std::string_view(bytes_).substr(0, 6)));
-    auto page = detail::legacy_page(bytes_.substr(0, 6), {});
+    auto v = unsigned(dxf_version_from_string(source_bytes().substr(0, 6)));
+    auto page = detail::legacy_page(source_bytes().substr(0, 6), {});
     auto saved = [&](std::int32_t node) -> ParameterCache {
         ParameterCache c;
         if (!insert)

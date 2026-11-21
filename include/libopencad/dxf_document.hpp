@@ -1685,7 +1685,7 @@ public:
     bool refresh_table_block(std::uint64_t table);
     std::optional<std::vector<std::optional<std::uint64_t>>>
     build_table_block(std::uint64_t table, const std::vector<TableCellField>& fields);
-    // rust writer-internal prepare_table_recompose_data. Explicit; write() does not call this.
+    // Apply the same table recompose metadata that write() generates on its output copy.
     void prepare_table_recompose_data();
     // rust CadDocument text-host fields (MTEXT/TEXT/ATTDEF/ATTRIB xdict ACAD_FIELD/TEXT).
     std::optional<std::uint64_t> set_text_field(std::uint64_t host, std::string_view template_code,
@@ -2012,6 +2012,10 @@ private:
     friend class DynamicBlockObjectReader;
     friend class AssociativeReader;
     friend class SolidHistoryReader;
+    std::vector<DxfRawField> table_recompose_fields(const DxfRecord& record, std::string_view root) const;
+    bool stage_table_recompose_data(DxfDocument& staged) const;
+    void forget_table_recompose_target(std::uint64_t handle);
+    void write_prepared(std::ostream& output) const;
     void validate_history_mutation(std::uint64_t entity) const;
     SolidHistoryGraph ensure_history_evaluation_graph(std::uint64_t entity);
     void write_history_operation(std::uint64_t node, const SolidHistoryOperation& operation);

@@ -32,13 +32,6 @@ const ArchLayerInfo *default_arch_layer(ArchKind kind) {
 bool finite_arch_point(Vector3 p) {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
 }
-void validate_arch_size(double width, double height) {
-    if (!std::isfinite(width) || width <= 0 || !std::isfinite(height) || height <= 0)
-        throw std::invalid_argument("Arch dimensions must be finite and positive");
-}
-std::vector<Vector3> rectangle_profile(double width, double depth) {
-    return {{}, {width, 0, 0}, {width, depth, 0}, {0, depth, 0}, {}};
-}
 std::string pack_arch_raw(unsigned v, const std::string &raw, std::int64_t handle_bits) {
     require(raw.size() < (1u << 30), "DWG record too large");
     DwgBitWriter prefix;
@@ -748,7 +741,6 @@ DecodedAec identity_decoded(std::string dxf, std::string cpp, ArchKind kind, boo
     return decoded;
 }
 bool arch_near(double a, double b) { return std::abs(a - b) <= 1e-6; }
-bool arch_near_point(Vector3 a, Vector3 b) { return (a - b).length() <= 1e-6; }
 std::optional<std::uint64_t> nod_named_entry(const DwgR2000Objects &o, std::string_view dict_name,
                                             std::string_view entry) {
     auto nod = nod_handle(o);

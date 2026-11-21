@@ -644,17 +644,56 @@ int main(int argc, char **argv) {
         auto roundtrip_id = table_doc.add_table(roundtrip);
         auto xdict = table_doc.add_extension_dictionary(hex(roundtrip_id));
         table_doc.add_xrecord(hex(xdict), "ACAD_XREC_ROUNDTRIP", {{90, "0"}});
+        constexpr auto recompose_key = "ACDB_RECOMPOSE_DATA";
+        auto recompose_handle = [&](const DxfDocument &doc) {
+            return doc.dictionary_entry(doc.root_dictionary_handle(), recompose_key);
+        };
+        auto source_seed = table_doc.next_handle();
+        check(recompose_handle(table_doc).empty(), "recompose starts absent");
+        for (bool binary : {false, true}) {
+            std::stringstream bytes;
+            table_doc.write(bytes, binary);
+            auto saved = DxfDocument::read(bytes);
+            auto entry = recompose_handle(saved);
+            check(entry == hex(source_seed) && saved.next_handle() == source_seed + 1,
+                  "write allocates recompose and persists the next handle");
+            check(saved.get_record(entry)->type() == "XRECORD", "saved recompose is an XRECORD");
+            std::stringstream repeated;
+            saved.write(repeated);
+            check(repeated.str() == bytes.str(), "recompose save is idempotent");
+
+            check(saved.remove_entity(roundtrip_id), "remove a saved table referenced by recompose");
+            std::stringstream after;
+            saved.write(after);
+            auto without_table = DxfDocument::read(after);
+            check(recompose_handle(without_table).empty() && !without_table.get_record(entry),
+                  "unused recompose is removed on save");
+        }
+        check(recompose_handle(table_doc).empty() && table_doc.next_handle() == source_seed,
+              "write does not mutate the source document");
+
+        auto conflict = table_doc;
+        auto foreign = conflict.add_dictionary(conflict.root_dictionary_handle(), recompose_key);
+        std::stringstream conflict_bytes;
+        conflict.write(conflict_bytes);
+        auto saved_conflict = DxfDocument::read(conflict_bytes);
+        check(recompose_handle(saved_conflict) == hex(foreign) &&
+                  saved_conflict.get_record(hex(foreign))->type() == "DICTIONARY",
+              "write preserves a conflicting object");
+
+        auto style_id = table_doc.add_table_style("Recompose", TableStyleDefinition{});
+        auto style_dict = table_doc.add_extension_dictionary(hex(style_id));
+        table_doc.add_cell_style_map(hex(style_dict), "ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP", {});
+
+        std::ofstream table_out(prefix + "-table.dxf", std::ios::binary);
+        table_doc.write(table_out);
         table_doc.prepare_table_recompose_data();
-        auto recompose = table_doc.dictionary_entry(table_doc.root_dictionary_handle(), "ACDB_RECOMPOSE_DATA");
+        auto recompose = recompose_handle(table_doc);
         check(!recompose.empty(), "ACDB_RECOMPOSE_DATA");
         const auto *xrec = table_doc.get_record(recompose);
         check(xrec && xrec->type() == "XRECORD", "recompose xrecord");
         table_doc.prepare_table_recompose_data();
-        check(table_doc.dictionary_entry(table_doc.root_dictionary_handle(), "ACDB_RECOMPOSE_DATA") == recompose,
-              "recompose unchanged");
-
-        std::ofstream table_out(prefix + "-table.dxf", std::ios::binary);
-        table_doc.write(table_out);
+        check(recompose_handle(table_doc) == recompose, "recompose unchanged");
 
         auto host_doc = DxfDocument::create();
         MTextDefinition host_def;
