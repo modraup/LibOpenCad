@@ -4,10 +4,11 @@ use acadrust::{
 };
 use std::fmt::Write;
 
-pub fn blank(version: &str, file: &str) -> acadrust::Result<()> {
+pub fn blank(version: &str, file: &str, inches: bool) -> acadrust::Result<()> {
     let mut doc = CadDocument::new();
     doc.version = DxfVersion::from_version_string(version);
     doc.header.handle_seed = 0x10000000;
+    if inches { doc.header.insertion_units = 1; }
     DwgWriter::write_to_file(file, &doc)
 }
 pub fn generate(version: &str, file: &str) -> acadrust::Result<()> {

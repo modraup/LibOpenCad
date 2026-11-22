@@ -4,7 +4,7 @@ project(LibOpenCad VERSION 0.1.0 LANGUAGES CXX)
 # Embed the upstream empty-document defaults so installed libraries can create
 # drawings without a runtime Rust dependency or access to the source tree.
 set(dwg_defaults "")
-foreach(v IN ITEMS AC1009 AC1012 AC1014 AC1015 AC1018 AC1021 AC1024 AC1027 AC1032)
+foreach(v IN ITEMS AC1009 AC1012 AC1014 AC1015 AC1018 AC1021 AC1024 AC1027 AC1032 AC1032_inches)
     set(default_file "${CMAKE_CURRENT_SOURCE_DIR}/src/dwg_defaults/${v}.dwg")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${default_file}")
     file(READ "${default_file}" default_hex HEX)

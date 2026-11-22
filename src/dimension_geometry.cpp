@@ -230,7 +230,8 @@ void DxfDimension::apply_mirror(const Transform &t) {
         return;
     apply_transform(t);
 }
-double DxfDimension::stored_measurement() const { return stored(definition()); }
+double dimension_measurement(const DimensionDefinition &dimension) { return stored(dimension); }
+double DxfDimension::stored_measurement() const { return dimension_measurement(definition()); }
 double DxfDimension::measurement() const {
     auto d = definition();
     double n = stored(d);

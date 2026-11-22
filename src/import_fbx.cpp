@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -109,6 +110,14 @@ struct FbxGeometry {
     std::string name;
     std::vector<std::array<double, 3>> vertices;
     std::vector<std::int32_t> polygon_indices;
+    std::vector<std::int32_t> material_slots;
+    bool per_polygon = false;
+
+    int material_slot(std::size_t polygon) const {
+        if (!per_polygon && material_slots.empty()) return 0;
+        const auto index = per_polygon ? polygon : 0;
+        return index < material_slots.size() ? material_slots[index] : -1;
+    }
 };
 
 struct FbxMaterialInfo {
@@ -606,13 +615,12 @@ std::optional<FbxNode> parse_ascii_node(AsciiCursor &c) {
                     c.next_char();
                 if (prefix == "a") {
                     FbxProp prop;
-                    bool any_dot = false;
-                    for (const auto &v : values)
-                        if (v.find('.') != std::string::npos) {
-                            any_dot = true;
-                            break;
-                        }
-                    if (any_dot) {
+                    // ASCII FBX permits whole-number spellings in floating-point arrays.
+                    const bool real_values = node.name == "Vertices" ||
+                        std::any_of(values.begin(), values.end(), [](const auto &v) {
+                            return v.find_first_of(".eE") != std::string::npos;
+                        });
+                    if (real_values) {
                         prop.kind = FbxPropKind::ArrayF64;
                         for (const auto &v : values) {
                             char *end = nullptr;
@@ -685,6 +693,22 @@ std::string after_colon_colon(std::string_view raw) {
     return name;
 }
 
+// Layer 0 selects its material element by typed index, independently of storage order.
+const FbxNode *material_element(const FbxNode &geometry) {
+    for (auto layer : geometry.children_named("Layer")) {
+        if (layer->prop_i64(0) != 0) continue;
+        for (auto element : layer->children_named("LayerElement")) {
+            auto type = element->child("Type");
+            auto index = element->child("TypedIndex");
+            if (!type || type->prop_str(0) != "LayerElementMaterial" || !index) continue;
+            for (auto material : geometry.children_named("LayerElementMaterial"))
+                if (material->prop_i64(0) == index->prop_i64(0)) return material;
+            return nullptr;
+        }
+    }
+    return geometry.child("LayerElementMaterial");
+}
+
 std::optional<FbxGeometry> extract_geometry(const FbxNode &node) {
     auto id = node.prop_i64(0);
     if (!id)
@@ -708,6 +732,13 @@ std::optional<FbxGeometry> extract_geometry(const FbxNode &node) {
     if (!indices)
         return std::nullopt;
     geom.polygon_indices = *indices;
+    if (auto material = material_element(node)) {
+        const auto mapping = material->child("MappingInformationType");
+        geom.per_polygon = mapping && mapping->prop_str(0) == "ByPolygon";
+        const auto slots = material->child("Materials");
+        if (slots && (geom.per_polygon || (mapping && mapping->prop_str(0) == "AllSame")))
+            if (auto values = slots->prop_i32_array(0)) geom.material_slots = *values;
+    }
     return geom;
 }
 
@@ -722,17 +753,7 @@ std::optional<FbxMaterialInfo> extract_material(const FbxNode &node) {
         for (auto p : props70->children_named("P")) {
             if (p->prop_str(0) != "DiffuseColor" || p->properties.size() < 7)
                 continue;
-            const auto &r = p->properties[4];
-            const auto &g = p->properties[5];
-            const auto &b = p->properties[6];
-            auto as_f = [](const FbxProp &prop) -> std::optional<float> {
-                if (prop.kind == FbxPropKind::F64)
-                    return static_cast<float>(prop.f64);
-                if (prop.kind == FbxPropKind::F32)
-                    return prop.f32;
-                return std::nullopt;
-            };
-            auto rf = as_f(r), gf = as_f(g), bf = as_f(b);
+            auto rf = p->prop_f64(4), gf = p->prop_f64(5), bf = p->prop_f64(6);
             if (!rf || !gf || !bf)
                 continue;
             mat.diffuse[0] = *rf;
@@ -795,25 +816,76 @@ void model_world(std::int64_t id, const std::unordered_map<std::int64_t, FbxMode
     }
 }
 
-MeshDefinition build_fbx_mesh(const std::vector<std::array<double, 3>> &vertices,
-                              const std::vector<std::int32_t> &polygon_indices, double scale, bool merge,
-                              double tolerance) {
-    std::vector<std::array<std::size_t, 3>> triangles;
-    std::vector<std::size_t> poly;
-    for (auto idx : polygon_indices) {
-        if (idx < 0) {
-            poly.push_back(static_cast<std::size_t>(~idx));
-            if (poly.size() >= 3)
-                for (std::size_t i = 1; i + 1 < poly.size(); ++i)
-                    triangles.push_back({poly[0], poly[i], poly[i + 1]});
-            poly.clear();
-        } else
-            poly.push_back(static_cast<std::size_t>(idx));
+using TrianglesByMaterial = std::map<int, std::vector<std::array<std::size_t, 3>>>;
+
+TrianglesByMaterial triangulate_by_material(const FbxGeometry &geometry, std::size_t slot_count) {
+    TrianglesByMaterial groups;
+    std::vector<std::size_t> polygon;
+    std::size_t polygon_number = 0;
+    for (auto index : geometry.polygon_indices) {
+        polygon.push_back(static_cast<std::size_t>(index < 0 ? ~index : index));
+        if (index >= 0) continue;
+        const int slot = geometry.material_slot(polygon_number++);
+        if (polygon.size() >= 3) {
+            auto &triangles = groups[slot >= 0 && static_cast<std::size_t>(slot) < slot_count ? slot : -1];
+            for (std::size_t i = 1; i + 1 < polygon.size(); ++i)
+                triangles.push_back({polygon.front(), polygon[i], polygon[i + 1]});
+        }
+        polygon.clear();
     }
-    return mesh_from_indexed(vertices, triangles, scale, merge, tolerance);
+    return groups;
 }
 
-DxfDocument build_document(const std::vector<FbxNode> &nodes, const ImportConfig &config) {
+// In the output XYZ frame, X is right, Y is forward and Z is up.
+struct SceneCoordinates {
+    std::array<int, 3> axis{0, 2, 1};
+    std::array<int, 3> sign{1, -1, 1};
+    double meters = 0.01;
+
+    void apply(MeshDefinition &mesh) const {
+        for (auto &p : mesh.vertices) {
+            const std::array<double, 3> v{p.x, p.y, p.z};
+            p = Vector3{sign[0] * v[axis[0]], sign[1] * v[axis[1]], sign[2] * v[axis[2]]} * meters;
+        }
+        const int parity = (axis[1] - axis[0]) * (axis[2] - axis[0]) * (axis[2] - axis[1]);
+        if (parity * sign[0] * sign[1] * sign[2] < 0) mesh.flip_normals();
+    }
+};
+
+SceneCoordinates scene_coordinates(const std::vector<FbxNode> &nodes) {
+    SceneCoordinates frame;
+    for (const auto &node : nodes) {
+        if (node.name != "GlobalSettings") continue;
+        const auto *props = node.child("Properties70");
+        if (!props) continue;
+        for (const auto *p : props->children_named("P")) {
+            const auto name = p->prop_str(0);
+            const auto value = p->prop_f64(4);
+            if (!name || !value) continue;
+            if (*name == "UnitScaleFactor") {
+                frame.meters = *value / 100;
+                if (!std::isfinite(frame.meters) || frame.meters <= 0) import_error("Invalid FBX unit scale");
+            }
+            static constexpr std::array<std::string_view, 3> axes{"CoordAxis", "FrontAxis", "UpAxis"};
+            static constexpr std::array<std::string_view, 3> signs{"CoordAxisSign", "FrontAxisSign", "UpAxisSign"};
+            for (std::size_t i = 0; i < axes.size(); ++i) {
+                if (*name == axes[i]) {
+                    if (*value != 0 && *value != 1 && *value != 2) import_error("Invalid FBX axis");
+                    frame.axis[i] = static_cast<int>(*value);
+                } else if (*name == signs[i]) {
+                    if (*value != -1 && *value != 1) import_error("Invalid FBX axis sign");
+                    frame.sign[i] = static_cast<int>(*value);
+                }
+            }
+        }
+        if (frame.axis[0] == frame.axis[1] || frame.axis[0] == frame.axis[2] || frame.axis[1] == frame.axis[2])
+            import_error("Invalid FBX coordinate system");
+        break;
+    }
+    return frame;
+}
+
+DxfDocument build_document(const std::vector<FbxNode> &nodes, const ImportConfig &config, const SceneCoordinates *frame = nullptr) {
     auto doc = DxfDocument::create();
     const FbxNode *objects = nullptr;
     for (const auto &n : nodes)
@@ -854,7 +926,7 @@ DxfDocument build_document(const std::vector<FbxNode> &nodes, const ImportConfig
     std::unordered_map<std::int64_t, std::int64_t> model_parent;
     if (connections) {
         for (auto c : connections->children_named("C")) {
-            if (c->properties.size() < 3)
+            if (c->properties.size() < 3 || c->prop_str(0) != "OO")
                 continue;
             auto child_id = c->prop_i64(1);
             auto parent_id = c->prop_i64(2);
@@ -876,35 +948,30 @@ DxfDocument build_document(const std::vector<FbxNode> &nodes, const ImportConfig
         if (model_id)
             if (auto mit = models.find(*model_id); mit != models.end())
                 model_name = mit->second.name;
-        const FbxMaterialInfo *mat_info = nullptr;
-        if (model_id)
-            if (auto mats = mat_to_model.find(*model_id); mats != mat_to_model.end() && !mats->second.empty())
-                if (auto mat = materials.find(mats->second.front()); mat != materials.end())
-                    mat_info = &mat->second;
-        std::string layer_label;
-        Color color = config.default_color;
-        if (mat_info) {
-            color = color_from_unit_rgb(mat_info->diffuse[0], mat_info->diffuse[1], mat_info->diffuse[2]);
-            layer_label = mat_info->name;
-        } else
-            layer_label = model_name;
+        const auto slots = model_id ? mat_to_model.find(*model_id) : mat_to_model.end();
+        const auto slot_count = slots == mat_to_model.end() ? 0 : slots->second.size();
         double world[16];
         copy_identity(world);
         if (model_id)
             model_world(*model_id, models, model_parent, world);
-        MeshDefinition mesh;
-        if (is_identity(world))
-            mesh = build_fbx_mesh(geom.vertices, geom.polygon_indices, config.scale_factor, config.merge_vertices,
-                                  config.merge_tolerance);
-        else {
-            auto transformed = transform_positions(geom.vertices, world);
-            mesh = build_fbx_mesh(transformed, geom.polygon_indices, config.scale_factor, config.merge_vertices,
-                                  config.merge_tolerance);
+        std::vector<std::array<double, 3>> transformed;
+        if (!is_identity(world)) transformed = transform_positions(geom.vertices, world);
+        const auto &vertices = transformed.empty() ? geom.vertices : transformed;
+        for (const auto &[slot, triangles] : triangulate_by_material(geom, slot_count)) {
+            auto mesh = mesh_from_indexed(vertices, triangles, config.scale_factor, config.merge_vertices,
+                                          config.merge_tolerance);
+            if (mesh.faces.empty()) continue;
+            if (frame) frame->apply(mesh);
+            auto color = config.default_color;
+            auto label = model_name;
+            if (slot >= 0) {
+                const auto &mat = materials.at(slots->second[slot]);
+                color = color_from_unit_rgb(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2]);
+                label = mat.name;
+            }
+            const auto layer = create_material_layer(doc, config, label, color);
+            add_mesh_entity(doc, std::move(mesh), layer, color);
         }
-        if (mesh.vertices.empty())
-            continue;
-        const auto layer = create_material_layer(doc, config, layer_label, color);
-        add_mesh_entity(doc, std::move(mesh), layer, color);
     }
     return doc;
 }
@@ -934,6 +1001,12 @@ DxfDocument FbxImporter::import() const {
     if (is_binary_fbx(data_))
         return build_document(parse_binary_fbx(data_), config_);
     return build_document(parse_ascii_fbx(data_), config_);
+}
+
+DxfDocument FbxImporter::import_z_up_meters() const {
+    const auto nodes = is_binary_fbx(data_) ? parse_binary_fbx(data_) : parse_ascii_fbx(data_);
+    const auto frame = scene_coordinates(nodes);
+    return build_document(nodes, config_, &frame);
 }
 
 } // namespace libopencad

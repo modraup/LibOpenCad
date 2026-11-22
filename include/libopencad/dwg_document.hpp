@@ -33,11 +33,16 @@ class DwgDocument {
     static DwgRecoverOutcome recover(std::istream &input);
     static DwgRecoverOutcome recover(std::istream &input, const DwgReadOptions &options);
     void write(std::ostream &output) const;
+    double drawing_linetype_scale() const;
     const DwgR2000Objects &objects() const { return objects_; }
     DxfLine line(std::uint64_t handle) const;
+    DxfLwPolyline lwpolyline(std::uint64_t handle) const;
     DxfCircle circle(std::uint64_t handle) const;
+    DxfFace3D face3d(std::uint64_t handle) const;
+    DxfSolid solid(std::uint64_t handle) const;
     DxfArc arc(std::uint64_t handle) const;
     DxfText text(std::uint64_t handle) const;
+    DxfMText mtext(std::uint64_t handle) const;
     // R13+ REGION/BODY/3DSOLID and R2004+ surfaces. Typed errors are isolated by handle.
     // R2007+ history and owned versioned metadata. Shared dictionaries reject edits.
     // Replaces operation inputs, preserving common fields and the entity B-rep.

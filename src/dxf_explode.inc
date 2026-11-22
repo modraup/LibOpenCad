@@ -10,20 +10,42 @@ std::vector<ExplodedPrimitive> DxfDocument::explode_entity(std::string_view hand
     if (location.vertex || location.seqend ||
         std::find(entity_records_.begin(), entity_records_.end(), location.record) == entity_records_.end())
         throw std::invalid_argument("Explode requires a top-level entity");
+    return explode_record(records_[location.record], version_);
+}
+std::vector<ExplodedPrimitive> DxfDocument::explode_lwpolyline(const DxfLwPolyline &polyline) {
+    return explode_record(polyline, polyline.version_);
+}
+std::vector<ExplodedPrimitive> DxfDocument::explode_record(const Record &record, DxfVersion version) {
     std::vector<ExplodedPrimitive> parts;
+    // Detached primitives inherit only common visual fields and ownership. Cache the
+    // template so a many-vertex polyline reads its source record once for all segments.
+    DxfEntity base;
+    const DxfRecord *base_source = nullptr;
     auto common = [&](const DxfRecord &source, std::string type, std::string subclass) {
-        DxfEntity properties;
-        static_cast<DxfRecord &>(properties) = source;
-        auto output = make_entity(std::move(type), std::move(subclass), {});
-        output.set_layer(properties.layer());
-        output.set_linetype(properties.linetype());
-        output.set_color(properties.color());
-        output.set_line_weight(properties.line_weight());
-        output.set_invisible(properties.is_invisible());
-        output.set_display_properties(properties.display_properties());
-        if (!source.owner_handle().empty())
-            output.set_field("", 330, source.owner_handle());
-        output.set_short_field("AcDbEntity", 67, source.short_field("AcDbEntity", 67, 0));
+        if (&source != base_source) {
+            base_source = &source;
+            base = DxfEntity{};
+            base.binary_ = source.binary_;
+            base.code_page_ = source.code_page_;
+            base.version_ = version;
+            base.pairs_.push_back({0, {}});
+            if (!source.owner_handle().empty())
+                base.pairs_.push_back({330, source.owner_handle()});
+            if (version != DxfVersion::AC1009)
+                base.pairs_.push_back({100, "AcDbEntity"});
+            source.locate_if("AcDbEntity", [&](std::size_t index, int code) {
+                switch (code) {
+                case 6: case 8: case 48: case 60: case 62: case 67: case 284:
+                case 347: case 348: case 370: case 380: case 390: case 420: case 430: case 440:
+                    base.pairs_.push_back(source.pairs_[index]);
+                }
+                return false;
+            });
+        }
+        auto output = base;
+        output.pairs_.front().value = std::move(type);
+        if (version != DxfVersion::AC1009)
+            output.pairs_.push_back({100, std::move(subclass)});
         return output;
     };
     auto line = [&](const DxfRecord &source, Point3 a, Point3 b, double thickness, Vector3 normal) {
@@ -76,7 +98,7 @@ std::vector<ExplodedPrimitive> DxfDocument::explode_entity(std::string_view hand
         };
         DxfArc e;
         static_cast<DxfEntity &>(e) = common(source, "ARC", "AcDbCircle");
-        if (version_ != DxfVersion::AC1009)
+        if (version != DxfVersion::AC1009)
             e.pairs_.push_back({100, "AcDbArc"});
         e.set_center(c);
         e.set_radius(std::abs(radius));
@@ -95,10 +117,12 @@ std::vector<ExplodedPrimitive> DxfDocument::explode_entity(std::string_view hand
                 if (n < 2)
                     return;
                 auto count = e.is_closed() ? n : n - 1;
+                const auto elevation = e.elevation(), thickness = e.thickness();
+                const auto normal = e.normal();
+                parts.reserve(count);
                 for (std::size_t i = 0; i < count; ++i) {
-                    auto a = vs[i], b = vs[(i + 1) % n];
-                    segment(e, {a.x, a.y, e.elevation()}, {b.x, b.y, e.elevation()}, a.bulge, e.thickness(),
-                            e.normal());
+                    const auto &a = vs[i], &b = vs[(i + 1) % n];
+                    segment(e, {a.x, a.y, elevation}, {b.x, b.y, elevation}, a.bulge, thickness, normal);
                 }
             } else if constexpr (std::is_same_v<T, DxfPolyline2D>) {
                 auto n = e.vertex_count();
@@ -184,7 +208,7 @@ std::vector<ExplodedPrimitive> DxfDocument::explode_entity(std::string_view hand
             } else
                 throw std::invalid_argument("Entity type is not supported by native EXPLODE yet");
         },
-        records_[location.record]);
+        record);
     return parts;
 }
 std::vector<std::uint64_t> DxfDocument::explode_entity_into(std::string_view handle,

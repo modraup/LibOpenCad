@@ -37,6 +37,11 @@ New TEXT uses layer 0, Standard style and default formatting. The initializer ac
 DWG verification compares native output with the pinned Rust library across nine signatures. Independent AutoCAD/BricsCAD open and AUDIT validation has not been performed. Opaque records are retained during supported edits; their presence does not imply typed editing support or exhaustive DWG compatibility.
 
 
+For R2018 drawings measured in inches, `create_dwg(DwgTemplate::R2018Inches, primitives)` sets the insertion units in the file header. Use `DwgFaceGeometry` for a 3DFACE, repeating the third corner for a triangle. The primitive carries its layer name and entity color. Read a face with `drawing.face3d(handle)` for handles in `drawing.objects().faces`. The inch seed uses the same standard tables as the other seeds and can be regenerated with the upstream fixture command `generate-dwg-inch-blank src/dwg_defaults/AC1032_inches.dwg`.
+
+To write reusable R2018 blocks, pass their names as the third argument to `create_dwg(DwgTemplate::R2018Inches, primitives, block_names)`. Set `DwgPrimitive::block_name` to the owning definition for local geometry. A primitive containing an `InsertDefinition` references its target by `InsertDefinition::block_name` and carries its own insertion point, rotation, signed scales and extrusion normal. A nested reference sets both names. Empty primitive owner names select drawing space.
+
+
 Create a named layer with `drawing.add_layer("Survey", 3)`, then use `set_layer("Survey")` and `update` on an entity. The optional ACI color defaults to 7. The layer uses the drawing's Continuous linetype. The return value is the new DWG object handle for R13 and later or the zero-based physical slot for R11/R12. Duplicate names use the same case-insensitive matching as lookup. AC1009 names must fit in 32 bytes after code-page encoding. AC1009 LINE/CIRCLE/ARC geometry updates preserve the existing record size and addresses. An update that needs a new optional elevation, thickness, normal or Z field in an existing AC1009 record reports an error. The document retains the previous bytes if an update fails.
 
 To assign a named linetype to an existing DWG layer, create the pattern and set the layer's reference before saving the drawing.

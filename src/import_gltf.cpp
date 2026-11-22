@@ -666,20 +666,20 @@ std::vector<std::size_t> read_accessor_scalar(std::size_t accessor_idx, const st
 
 std::pair<std::string, std::array<float, 4>> get_material_color(std::size_t mat_idx,
                                                                 const std::vector<JsonValue> *materials) {
-    const std::pair<std::string, std::array<float, 4>> def{"", {0.8f, 0.8f, 0.8f, 1.0f}};
+    const std::pair<std::string, std::array<float, 4>> def{"", {1.0f, 1.0f, 1.0f, 1.0f}};
     if (!materials || mat_idx >= materials->size())
         return def;
     const auto &mat = (*materials)[mat_idx];
     std::string name;
     if (auto n = mat.get("name"); n && n->as_str())
         name = std::string(*n->as_str());
-    std::array<float, 4> color{0.8f, 0.8f, 0.8f, 1.0f};
+    std::array<float, 4> color{1.0f, 1.0f, 1.0f, 1.0f};
     if (auto pbr = mat.get("pbrMetallicRoughness")) {
         if (auto bc = pbr->get("baseColorFactor") ? pbr->get("baseColorFactor")->as_array() : nullptr) {
             if (bc->size() >= 3) {
-                color[0] = static_cast<float>((*bc)[0].as_f64().value_or(0.8));
-                color[1] = static_cast<float>((*bc)[1].as_f64().value_or(0.8));
-                color[2] = static_cast<float>((*bc)[2].as_f64().value_or(0.8));
+                color[0] = static_cast<float>((*bc)[0].as_f64().value_or(1.0));
+                color[1] = static_cast<float>((*bc)[1].as_f64().value_or(1.0));
+                color[2] = static_cast<float>((*bc)[2].as_f64().value_or(1.0));
                 if (bc->size() >= 4)
                     color[3] = static_cast<float>((*bc)[3].as_f64().value_or(1.0));
             }
@@ -732,17 +732,20 @@ void append_gltf_mesh(DxfDocument &doc, const JsonValue &gltf_mesh, const Placed
         if (triangles.empty())
             continue;
         std::string material_name;
-        std::array<float, 4> color{0.8f, 0.8f, 0.8f, 1.0f};
-        if (auto material_index = primitive.get("material") ? primitive.get("material")->as_usize() : std::nullopt)
-            std::tie(material_name, color) = get_material_color(*material_index, tables.materials);
+        auto entity_color = tables.config->default_color;
+        auto material_index = primitive.get("material") ? primitive.get("material")->as_usize() : std::nullopt;
+        if (material_index && tables.materials && *material_index < tables.materials->size()) {
+            auto material = get_material_color(*material_index, tables.materials);
+            material_name = std::move(material.first);
+            const auto &rgb = material.second;
+            entity_color = color_from_unit_rgb(rgb[0], rgb[1], rgb[2]);
+        }
         auto transformed = transform_positions_f32(positions, instance.world);
         auto mesh = mesh_from_indexed(transformed, triangles, tables.config->scale_factor, tables.config->merge_vertices,
                                       tables.config->merge_tolerance);
         if (mesh.faces.empty())
             continue;
         const auto layer_label = material_name.empty() ? instance.name : material_name;
-        const auto entity_color =
-            material_name.empty() ? tables.config->default_color : color_from_unit_rgb(color[0], color[1], color[2]);
         const auto layer = create_material_layer(doc, *tables.config, layer_label, entity_color);
         add_mesh_entity(doc, std::move(mesh), layer, entity_color);
     }

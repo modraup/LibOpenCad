@@ -537,14 +537,29 @@ void mask_page(std::string &s, std::size_t offset) {
         s[i] ^= static_cast<char>(mask >> (8 * (i % 4)));
 }
 void align_page(std::string &s) { s.resize((s.size() + 31) & ~std::size_t(31), 0); }
-std::string plain_system_page(unsigned type, View payload) {
+// AC18 system directories use an LZ77 stream even when the map fits in
+// one literal run. Its size depends only on the payload length, so the page
+// map can describe its own on-disk extent before its checksum is calculated.
+std::size_t system_literal_prefix(std::size_t size) {
+    check(size >= 4, "DWG system page too small");
+    return size <= 18 ? 1 : 2 + (size - 19) / 255;
+}
+std::size_t system_page_extent(std::size_t size) {
+    return (20 + system_literal_prefix(size) + size + 3 + 31) & ~std::size_t(31);
+}
+std::string encode_system_page(unsigned type, View payload) {
+    std::string encoded(system_literal_prefix(payload.size()), '\0');
+    encoded.back() = static_cast<char>(payload.size() <= 18 ? payload.size() - 3
+                                                           : (payload.size() - 19) % 255 + 1);
+    encoded.append(payload);
+    encoded.append("\x11\0\0", 3); // LZ77 end marker.
     std::string h(20, 0);
     put(h, 0, type);
     put(h, 4, payload.size());
-    put(h, 8, payload.size());
-    put(h, 12, 1);
-    put(h, 16, adler(adler(0, h), payload));
-    h.append(payload);
+    put(h, 8, encoded.size());
+    put(h, 12, 2);
+    put(h, 16, adler(adler(0, h), encoded));
+    h += encoded;
     align_page(h);
     return h;
 }
@@ -651,7 +666,14 @@ std::string detail::replace_ac18_sections(View file, const std::map<std::string,
                 std::string header(32, 0);
                 put(header, 0, 0x4163043b);
                 put(header, 4, section_id);
-                register_page(header, bytes, off);
+                // Uncompressed DWG data pages occupy their entire declared capacity.
+                // The descriptor stores the logical section size separately.
+                if (bytes.size() == capacity) register_page(header, bytes, off);
+                else {
+                    std::string page(bytes);
+                    page.resize(capacity, '\0');
+                    register_page(header, page, off);
+                }
             }
         } else {
             for (std::size_t j = 0; j < pages; j++) {
@@ -688,11 +710,11 @@ std::string detail::replace_ac18_sections(View file, const std::map<std::string,
         new_catalog += page_entries;
     }
     check(written.size() == replacements.size(), "Missing replacement DWG section");
-    append_page(plain_system_page(0x4163003b, new_catalog));
+    append_page(encode_system_page(0x4163003b, new_catalog));
     auto map_address = out.size();
     append_int(physical_map, page_id + 1);
-    append_int(physical_map, (physical_map.size() + 4 + 20 + 31) & ~std::size_t(31));
-    out += plain_system_page(0x41630e3b, physical_map);
+    append_int(physical_map, system_page_extent(physical_map.size() + 4));
+    out += encode_system_page(0x41630e3b, physical_map);
     auto &inner = directory.inner;
     put(inner, 40, page_id + 1);
     put(inner, 44, out.size() - 256, 8);

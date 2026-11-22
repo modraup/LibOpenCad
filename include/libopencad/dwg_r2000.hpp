@@ -5,11 +5,14 @@
 #include <libopencad/associative.hpp>
 #include <libopencad/class_object.hpp>
 #include <libopencad/color.hpp>
+#include <libopencad/dimension.hpp>
+#include <array>
 #include <libopencad/dynamic_block.hpp>
 #include <libopencad/embedded_profile.hpp>
 #include <libopencad/surface.hpp>
 #include <libopencad/dwg_history.hpp>
 #include <libopencad/vector.hpp>
+#include <libopencad/lwvertex.hpp>
 #include <map>
 #include <optional>
 #include <string>
@@ -78,7 +81,7 @@ struct DwgR2000Record {
     std::size_t geometry_bit{}, split_field_bit{};
     std::size_t text_start{}, text_end{}, position_end{}, text_style_bit{};
     std::size_t ds_data_bit{};
-    std::size_t color_bit{}, color_handle_bit{}, visibility_bit{}, linetype_scale_bit{};
+    std::size_t layer_flags_bit{}, color_bit{}, color_handle_bit{}, visibility_bit{}, linetype_scale_bit{};
     std::size_t geometry_start{}, geometry_end{}, layer_bit{}, elevation_bit{}, thickness_bit{}, linetype_bit{}, linetype_flag_bit{};
 };
 struct DwgR2000EntityProperties {
@@ -102,6 +105,13 @@ struct DwgR2000Line {
     double thickness{};
     Vector3 normal;
 };
+struct DwgLwPolyline {
+    DwgR2000EntityProperties properties;
+    std::vector<LwVertex> vertices;
+    Vector3 normal{0, 0, 1};
+    double elevation{}, thickness{}, constant_width{};
+    bool closed{}, plinegen{};
+};
 struct DwgCircle {
     DwgR2000EntityProperties properties;
     Point3 center;
@@ -110,6 +120,35 @@ struct DwgCircle {
 };
 struct DwgArc : DwgCircle {
     double start_angle{}, end_angle{}; // radians
+};
+// Saved glyph layout of a native MTEXT. Background, columns and annotation
+// contexts are retained in the source record for same-version writes.
+struct DwgMText {
+    DwgR2000EntityProperties properties;
+    std::string value;
+    Point3 insertion;
+    Vector3 normal, x_direction;
+    double height{}, width{}, extents_height{}, extents_width{}, line_spacing_factor{1};
+    std::optional<double> rectangle_height;
+    std::int16_t attachment{1}, drawing_direction{1}, line_spacing_style{1};
+    std::uint64_t style{};
+};
+struct DwgDimension {
+    DwgR2000EntityProperties properties;
+    DimensionDefinition definition;
+    std::uint64_t graphics_block{}, style{};
+    Vector3 insertion_scale{1,1,1};
+};
+struct DwgFace {
+    DwgR2000EntityProperties properties;
+    std::array<Point3, 4> corners{};
+    std::uint8_t invisible_edges = 0;
+};
+struct DwgSolid {
+    DwgR2000EntityProperties properties;
+    std::array<Point3,4> corners{};
+    double thickness{};
+    Vector3 normal{0,0,1};
 };
 struct DwgText {
     DwgR2000EntityProperties properties;
@@ -149,6 +188,8 @@ struct DwgSymbolRecord {
     std::uint64_t owner{}, begin{}, end{}, first{}, last{}, layout{}, extension_dictionary{};
     std::vector<std::uint64_t> members, inserts;
     std::uint64_t linetype{}; // LAYER record reference
+    Point3 base_point{}; // BLOCK_HEADER insertion base in block coordinates.
+    bool external_block{}; // Xref or overlay.
 };
 struct DwgEedItem {
     std::uint64_t application{};
@@ -161,6 +202,7 @@ struct DwgInsert {
     std::uint64_t block{};
     std::int16_t columns = 1, rows = 1;
     bool minsert = false, has_attributes = false;
+    std::string legacy_block_name; // AC1009 references a block table slot instead of a handle.
 };
 struct DwgDynamicRecord {
     std::uint64_t handle{}, owner{}, extension_dictionary{};
@@ -180,14 +222,26 @@ struct DwgClassRecord {
 struct DwgR2000Objects {
     std::uint64_t model_space{}, paper_space{};
     std::map<std::uint64_t, DwgSymbolRecord> symbols;
+    std::map<std::string, Color> layer_colors; // Named CAD layers, including AC1009 table entries.
+    std::map<std::string, std::vector<double>> simple_linetypes;
+    std::map<std::string, std::uint16_t> legacy_layer_linetypes;
     // AC1009 tables have physical slots instead of stored object handles.
     std::map<std::int16_t, std::vector<std::string>> legacy_symbol_names;
     std::map<std::string, std::size_t> legacy_block_ends;
+    std::map<std::string, DwgSymbolRecord> legacy_blocks; // Named AC1009 blocks, indexed by table name.
     std::map<std::uint64_t, DwgR2000Record> records;
     std::map<std::uint64_t, DwgR2000Line> lines;
+    std::map<std::uint64_t, DwgLwPolyline> lwpolylines;
+    std::map<std::uint64_t, std::string> lwpolyline_errors;
     std::map<std::uint64_t, DwgCircle> circles;
     std::map<std::uint64_t, DwgArc> arcs;
     std::map<std::uint64_t, DwgText> texts;
+    std::map<std::uint64_t, DwgDimension> dimensions;
+    std::map<std::uint64_t, DwgSolid> solids;
+    std::map<std::uint64_t, DwgFace> faces;
+    std::map<std::uint64_t, std::string> dimension_errors;
+    std::map<std::uint64_t, DwgMText> mtexts;
+    std::map<std::uint64_t, std::string> mtext_errors;
     // Positional class names, including duplicates.
     std::vector<std::string> class_names;
     std::vector<DwgClassRecord> classes;

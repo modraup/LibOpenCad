@@ -208,6 +208,38 @@ DxfLine DwgDocument::line(std::uint64_t h) const {
     extrusion(e, v);
     return e;
 }
+DxfLwPolyline DwgDocument::lwpolyline(std::uint64_t h) const {
+    const auto &poly = objects_.lwpolylines.at(h);
+    DxfLwPolyline entity;
+    initialize(entity, "LWPOLYLINE", h, poly.properties);
+    entity.set_closed(poly.closed);
+    entity.set_plinegen(poly.plinegen);
+    entity.set_elevation(poly.elevation);
+    entity.set_thickness(poly.thickness);
+    entity.set_constant_width(poly.constant_width);
+    entity.set_normal(poly.normal);
+    entity.set_vertices(poly.vertices);
+    return entity;
+}
+DxfFace3D DwgDocument::face3d(std::uint64_t h) const {
+    const auto &value = objects_.faces.at(h);
+    DxfFace3D entity;
+    initialize(entity, "3DFACE", h, value.properties);
+    for (std::size_t i = 0; i < 4; ++i) entity.set_corner(i, value.corners[i]);
+    entity.set_invisible_edges(value.invisible_edges);
+    return entity;
+}
+DxfSolid DwgDocument::solid(std::uint64_t h) const {
+    const auto &value = objects_.solids.at(h);
+    const auto type = objects_.records.at(h).type;
+    DxfSolid entity;
+    initialize(entity, type == 9 || type == 32 ? "TRACE" : "SOLID", h, value.properties);
+    for (std::size_t i = 0; i < value.corners.size(); ++i)
+        entity.set_corner(i, value.corners[i]);
+    entity.set_normal(value.normal);
+    entity.set_thickness(value.thickness);
+    return entity;
+}
 DxfCircle DwgDocument::circle(std::uint64_t h) const {
     auto &v = objects_.circles.at(h);
     DxfCircle e;
@@ -381,6 +413,28 @@ Vector3 DwgDocument::modeler_reference_point(std::uint64_t h) const {
             }
         }
     return found ? (low + high) * 0.5 : placement.translation;
+}
+DxfMText DwgDocument::mtext(std::uint64_t h) const {
+    const auto &t = objects_.mtexts.at(h);
+    DxfMText entity;
+    initialize(entity, "MTEXT", h, t.properties);
+    MTextDefinition d;
+    d.text = t.value;
+    d.insertion = t.insertion;
+    d.normal = t.normal;
+    d.x_direction = t.x_direction;
+    d.height = t.height;
+    d.rectangle_width = t.width;
+    d.rectangle_height = t.rectangle_height;
+    d.attachment = t.attachment;
+    d.drawing_direction = t.drawing_direction;
+    d.extents_width = t.extents_width;
+    d.extents_height = t.extents_height;
+    d.line_spacing_style = t.line_spacing_style;
+    d.line_spacing_factor = t.line_spacing_factor;
+    if (const auto style = objects_.symbols.find(t.style); style != objects_.symbols.end()) d.style = style->second.name;
+    entity.set_definition(d);
+    return entity;
 }
 DxfText DwgDocument::text(std::uint64_t h) const {
     const auto &t = objects_.texts.at(h);

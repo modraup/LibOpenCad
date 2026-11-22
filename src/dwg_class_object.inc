@@ -4,18 +4,7 @@
 // viewing index, section settings, sun study, data table, geomap image,
 // model-doc view styles, data links, object data and ViewRep families.
 Color read_cm_color(DynamicStream &s) {
-    (void)s.main.bit_short();
-    auto rgb = static_cast<std::uint32_t>(s.main.bit_long());
-    Color color = rgb == 0xc0000000u     ? Color::by_layer()
-                  : rgb == 0xc8000000u   ? Color::none()
-                  : (rgb & 0x01000000u)  ? Color::from_index(static_cast<std::int16_t>(rgb & 255))
-                                         : Color::from_true_color_value(rgb);
-    auto flags = s.main.bits(8);
-    if (flags & 1)
-        (void)s.str();
-    if (flags & 2)
-        (void)s.str();
-    return color;
+    return read_packed_cm_color(s.main, [&] { return s.str(); });
 }
 RenderSettings read_render_settings(DynamicStream &s, bool rapid_rt, bool read_predefined_bit) {
     auto stored = s.main.bit_long();

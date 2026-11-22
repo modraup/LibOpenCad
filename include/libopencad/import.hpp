@@ -97,6 +97,9 @@ public:
     static FbxImporter from_reader(std::istream &input);
     FbxImporter &with_config(ImportConfig config);
     DxfDocument import() const;
+    // Apply FBX GlobalSettings to the static geometry after evaluating node transforms.
+    // import() continues to return unmodified file units and axes.
+    DxfDocument import_z_up_meters() const;
 
 private:
     std::vector<std::uint8_t> data_;

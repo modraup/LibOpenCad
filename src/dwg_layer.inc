@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 // acadrust header_writer, object_writer::{write_layer, write_line_type, write_ltype_control} and r12/tables.
 namespace {
-std::size_t seed_position(std::string_view data, unsigned v) {
+enum class HeaderVariable { HandleSeed, LinetypeScale };
+std::size_t variable_position(std::string_view data, unsigned v, HeaderVariable field) {
     DwgBitReader r(data);
     if (v >= 1021)
         r.little_endian(4); // separate handle stream offset
@@ -34,6 +35,7 @@ std::size_t seed_position(std::string_view data, unsigned v) {
             r.bit_long();
     for (int i = 0; i < 19; i++)
         r.bit_short();
+    if (field == HeaderVariable::LinetypeScale) return r.position();
     for (int i = 0; i < 21; i++)
         r.bit_double();
     text();
@@ -77,7 +79,7 @@ std::string update_symbol_seed(std::string_view header, unsigned v, std::uint64_
     const auto data = dwg_header_payload(header, v);
     const auto start = static_cast<std::size_t>(data.data() - header.data());
     const auto size = data.size();
-    auto pos = seed_position(data, v);
+    auto pos = variable_position(data, v, HeaderVariable::HandleSeed);
     DwgBitReader r(data);
     r.seek(pos);
     auto seed = r.handle();
@@ -187,21 +189,24 @@ std::string finish_symbol(DwgBitWriter &main, const DwgBitWriter &strings, const
     }
     return pack_record(v, main, split, refs);
 }
+void write_layer_cmc(DwgBitWriter &main, Color color) {
+    const auto rgb = color.to_true_color_value();
+    const auto packed = rgb ? (0xc2000000u | *rgb) : (0xc3000000u | color.approximate_index());
+    main.bit_short(0);
+    main.bit_long(static_cast<std::int32_t>(packed));
+    main.bits(8, 0);
+}
 std::string encode_layer(unsigned v, std::uint64_t id, std::uint64_t owner, std::uint64_t continuous,
-                         std::string_view name, const char *page, int color, unsigned lw_index = 31) {
+                         std::string_view name, const char *page, Color color, unsigned lw_index = 31, bool off = false) {
     DwgBitWriter main, refs, strings;
     auto split = start_symbol(main, refs, v, 51, id, owner);
     symbol_name(main, strings, v, name, page);
     if (v >= 1015)
-        main.bit_short(static_cast<std::int16_t>(((lw_index & 31) << 5) | 16));
+        main.bit_short(static_cast<std::int16_t>(((lw_index & 31) << 5) | 16 | (off ? 2 : 0)));
     else
         main.bits(4, 0);
-    if (v >= 1018) {
-        main.bit_short(0);
-        main.bit_long(static_cast<std::int32_t>(0xc3000000u | color));
-        main.bits(8, 0);
-    } else
-        main.bit_short(color);
+    if (v >= 1018) write_layer_cmc(main, color);
+    else main.bit_short(color.approximate_index());
     refs.absolute_handle(5, 0);
     if (v >= 1015)
         refs.absolute_handle(5, 0);
@@ -239,7 +244,7 @@ std::string encode_linetype(unsigned v, std::uint64_t id, std::uint64_t owner, s
     return finish_symbol(main, strings, refs, v, split);
 }
 std::string extend_symbol_control(std::string_view body, DwgR2000Record r, unsigned v, std::uint64_t self,
-                                  std::uint64_t id) {
+                                  const std::vector<std::uint64_t> &ids) {
     DwgBitReader in(body);
     in.seek(r.handle_end_bit);
     skip_entity_prefix(in, body.size() * 8, false, v);
@@ -266,11 +271,12 @@ std::string extend_symbol_control(std::string_view body, DwgR2000Record r, unsig
     DwgBitReader old(body);
     DwgBitWriter main, refs;
     copy_until(main, old, pos);
-    main.bit_long(count + 1);
+    require(ids.size() <= std::size_t(INT32_MAX - count), "Too many table entries");
+    main.bit_long(count + static_cast<int>(ids.size()));
     old.seek(in.position());
     copy_until(main, old, r.main_bits);
     copy_until(refs, old, handles.position());
-    refs.absolute_handle(2, id);
+    for (auto id : ids) refs.absolute_handle(2, id);
     copy_until(refs, old, body.size() * 8 - (8 - r.main_bits % 8) % 8);
     return pack_record(v, main, r.split_field_bit, refs);
 }
@@ -440,7 +446,7 @@ std::string insert_symbol(std::string_view file, const DwgR2000Objects &o, unsig
     }
     header = allocate_symbol_handle(header, v, o.records.rbegin()->first, id);
     auto r = o.records.at(control);
-    auto table = extend_symbol_control(data.substr(r.body_offset, r.body_size), r, v, control, id);
+    auto table = extend_symbol_control(data.substr(r.body_offset, r.body_size), r, v, control, {id});
     auto record = encode(id, control);
     if (v < 1018)
         return insert_linear_symbol(file, idx, r, std::move(header), std::move(table), std::move(record), id,
@@ -479,7 +485,7 @@ std::string detail::add_dwg_layer(std::string_view file, const DwgR2000Objects &
         return append_legacy_symbol(file, 1, std::move(row), id);
     }
     return insert_symbol(file, o, v, 50, id, [&](auto h, auto owner) {
-        return encode_layer(v, h, owner, *continuous, name, drawing_code_page(file, v), color, lw_index);
+        return encode_layer(v, h, owner, *continuous, name, drawing_code_page(file, v), Color::from_index(color), lw_index);
     });
 }
 

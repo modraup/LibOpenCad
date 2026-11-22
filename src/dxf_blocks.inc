@@ -49,6 +49,9 @@ void DxfInsert::set_definition(const InsertDefinition &d) {
     if (d.block_name.empty())
         throw std::invalid_argument("INSERT requires a block name");
     DxfInsert staged = *this;
+    if (staged.pairs_.empty()) {
+        staged.pairs_ = {{0, "INSERT"}, {100, "AcDbEntity"}, {100, "AcDbBlockReference"}};
+    }
     auto old = subclass();
     const auto scope = d.columns > 1 || d.rows > 1 ? "AcDbMInsertBlock" : "AcDbBlockReference";
     for (auto &p : staged.pairs_)

@@ -57,4 +57,6 @@ struct DimensionDefinition {
     bool text_user_positioned = false, flip_arrow1 = false, flip_arrow2 = false;
     double insertion_rotation = 0; // In-memory/DWG value; omitted by upstream DXF I/O.
 };
+// Compute the measurement from the defining geometry in drawing units (angles in radians).
+double dimension_measurement(const DimensionDefinition &dimension);
 } // namespace libopencad

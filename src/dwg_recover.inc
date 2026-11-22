@@ -7,6 +7,7 @@ template <class Visit> void visit_recovery_entities(const DwgR2000Objects &objec
             visit(handle, entity.properties);
     };
     visit_map(objects.lines);
+    visit_map(objects.faces);
     visit_map(objects.circles);
     visit_map(objects.arcs);
     visit_map(objects.texts);

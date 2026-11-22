@@ -261,6 +261,13 @@ constexpr auto layer_record = "AcDbLayerTableRecord";
 std::string DxfLayer::name() const { return text_field(layer_record, 2); }
 std::string DxfLayer::linetype() const { return text_field(layer_record, 6, "Continuous"); }
 int DxfLayer::signed_color_index() const { return short_field(layer_record, 62, 7); }
+Color DxfLayer::color() const {
+    const auto rgb = locate(layer_record, 420);
+    if (rgb.found)
+        if (auto packed = detail::as_i32_bits(pairs_[rgb.index].value, binary_))
+            return Color::from_true_color_value(*packed);
+    return Color::from_index(signed_color_index());
+}
 void DxfLayer::set_signed_color_index(int index) {
     if (!index || index < -255 || index > 255) throw std::invalid_argument("Invalid layer ACI");
     set_short_field(layer_record, 62, index);
@@ -826,6 +833,21 @@ void DxfDocument::set_header_point(std::string_view name, Point3 value) {
     }
 }
 
+double DxfDocument::drawing_linetype_scale() const {
+    if (!header_index_) return 1;
+    const auto &header = record_at({*header_index_, std::nullopt, false});
+    bool in_scale = false;
+    for (std::size_t i = 0; i < header.pairs_.size(); ++i) {
+        const auto &p = header.pairs_[i];
+        if (p.code == 9) in_scale = trim(p.value) == "$LTSCALE";
+        else if (in_scale && p.code == 40) {
+            const double scale = header.number_at(i);
+            return std::isfinite(scale) && scale > 0 ? scale : 1;
+        }
+    }
+    return 1;
+}
+
 std::int16_t DxfDocument::linear_unit_format() const { return header_int16("$LUNITS", 2); }
 std::int16_t DxfDocument::linear_unit_precision() const { return header_int16("$LUPREC", 4); }
 std::int16_t DxfDocument::angular_unit_format() const { return header_int16("$AUNITS", 0); }
@@ -1249,6 +1271,7 @@ DxfEntity DxfDocument::make_entity(std::string type, std::string subclass,
     }
     entity.set_layer(layer->name());
     entity.set_linetype(linetype ? linetype->name() : "");
+    if (options.linetype_scale != 1) entity.set_linetype_scale(options.linetype_scale);
     entity.set_color(options.color);
     entity.set_line_weight(options.line_weight);
     entity.set_invisible(options.invisible);

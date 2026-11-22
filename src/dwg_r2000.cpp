@@ -15,6 +15,7 @@
 #include <cstring>
 #include <tuple>
 #include <libopencad/dwg_create.hpp>
+#include <libopencad/dwg_document.hpp>
 #include <libopencad/dwg_r2000.hpp>
 #include <libopencad/dwg_sections.hpp>
 #include <libopencad/dxf_version.hpp>
@@ -376,9 +377,13 @@ void skip_entity_prefix(DwgBitReader &main, std::size_t end, bool graphic, unsig
             skip(size);
     }
 }
-bool basic_geometry(int type) { return type >= 17 && type <= 19; }
+bool basic_geometry(int type) { return (type >= 17 && type <= 19) || type == 28; }
+bool is_lwpolyline(int type, const std::vector<std::string> &classes) {
+    return type == 77 || (type >= 500 && std::size_t(type - 500) < classes.size() &&
+                          classes[type - 500] == "LWPOLYLINE");
+}
 DwgR2000Record read_record(std::string_view bytes, std::size_t offset, std::uint64_t handle,
-                           unsigned version) {
+                           unsigned version, const std::vector<std::string> &classes = {}) {
     bool early = version < 1015;
     DwgBitReader prefix(bytes);
     auto size = prefix.modular_short();
@@ -406,13 +411,15 @@ DwgR2000Record read_record(std::string_view bytes, std::size_t offset, std::uint
     require(id.code == 0 && id.value == handle, "DWG object handle disagrees with map");
     auto id_end = body.position();
     auto split_field = type_end;
-    if (early && (basic_geometry(type) || type == 1 || (type >= 37 && type <= 39))) {
+    const bool entity_split = basic_geometry(type) || type == 1 || type == 7 || type == 8 || (type >= 20 && type <= 26) || type == 31 || type == 32 || type == 44 ||
+                              (type >= 37 && type <= 39) || is_lwpolyline(type, classes);
+    if (early && entity_split) {
         skip_entity_prefix(body, size * std::size_t(8), true, version);
         split_field = body.position();
         split = body.little_endian(4);
     }
     // In R13/R14 the split follows type-specific data. Leave it unknown for opaque records.
-    if (!early || basic_geometry(type) || type == 1 || (type >= 37 && type <= 39))
+    if (!early || entity_split)
         require(split >= body.position() && split <= std::size_t(size) * 8,
                 "Invalid DWG object stream boundary");
     return {offset, offset + prefix_size, size, type, type_end, id_end, std::size_t(split), 0, split_field};
@@ -612,6 +619,27 @@ void read_geometry(std::string_view body, DwgR2000Record &r, std::uint64_t h, un
         result.modelers.emplace(h, std::move(modeler));
         return;
     }
+    if (r.type == 28) {
+        DwgFace face;
+        face.properties = props;
+        bool flags = true;
+        if (early) {
+            for (auto &corner : face.corners) corner = read_vector(main);
+        } else {
+            flags = !main.bits(1);
+            const bool flat = main.bits(1);
+            face.corners[0] = {main.raw_double(), main.raw_double(), flat ? 0 : main.raw_double()};
+            for (std::size_t i = 1; i < 4; ++i) {
+                const auto &p = face.corners[i-1];
+                face.corners[i] = {main.default_double(p.x), main.default_double(p.y), main.default_double(p.z)};
+            }
+        }
+        if (flags) face.invisible_edges = static_cast<std::uint8_t>(main.bit_short());
+        require(main.position() == main_end, "Unexpected DWG 3DFACE data");
+        r.geometry_end = main.position();
+        result.faces.emplace(h, std::move(face));
+        return;
+    }
     if (r.type == 19) {
         DwgR2000Line line;
         line.properties = std::move(props);
@@ -714,9 +742,24 @@ struct BlockBits {
     std::size_t split{}, split_field{}, count{}, after_count{}, begin{}, end{};
     bool external{};
 };
+template<class ReadText>
+Color read_packed_cm_color(DwgBitReader &main, ReadText read_text) {
+    main.bit_short(); // Modern CMC carries its color method in the packed word.
+    auto rgb = static_cast<std::uint32_t>(main.bit_long());
+    Color color = rgb == 0xc0000000u     ? Color::by_layer()
+                  : rgb == 0xc8000000u   ? Color::none()
+                  : (rgb & 0x01000000u)  ? Color::from_index(static_cast<std::int16_t>(rgb & 255))
+                                         : Color::from_true_color_value(rgb);
+    auto flags = main.bits(8);
+    if (flags & 1)
+        (void)read_text();
+    if (flags & 2)
+        (void)read_text();
+    return color;
+}
 DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint64_t h, unsigned v,
                             const char *page, BlockBits *positions = nullptr,
-                            DwgR2000Objects *control = nullptr) {
+                            DwgR2000Objects *catalog = nullptr) {
     DwgBitReader main(body);
     main.seek(r.handle_end_bit);
     skip_entity_prefix(main, body.size() * 8, false, v);
@@ -740,7 +783,7 @@ DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint6
         symbol.extension_dictionary = refs.handle(h).value;
     if (v >= 1027)
         main.bits(1);
-    if (control) {
+    if (catalog && r.type == 48) {
         auto count = main.bit_long();
         require(count >= 0 && std::size_t(count) <= (body.size() * 8 - refs.position()) / 8,
                 "Invalid DWG block control size");
@@ -748,8 +791,8 @@ DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint6
             refs.handle(h);
         auto model = refs.handle(h).value;
         auto paper = refs.handle(h).value;
-        control->model_space = model;
-        control->paper_space = paper;
+        catalog->model_space = model;
+        catalog->paper_space = paper;
         return symbol;
     }
     DwgBitReader strings(body, r.main_bits);
@@ -781,11 +824,40 @@ DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint6
     };
     symbol.name = text();
     if (r.type == 51) {
+        if (catalog) {
+            if (v < 1021) main.bits(1);
+            main.bit_short(); // xref flags
+            if (v < 1021) main.bits(1);
+            r.layer_flags_bit = main.position();
+            if (v < 1015) main.bits(4); // individual layer flags before R2000
+            else main.bit_short(); // packed flags and line weight
+            catalog->layer_colors[symbol.name] = v < 1018 ? Color::from_index(main.bit_short())
+                                                          : read_packed_cm_color(main, text);
+        }
         refs.handle(h); // xref
         if (v >= 1015) refs.handle(h); // plot style
         if (v >= 1021) refs.handle(h); // material
         r.linetype_bit = refs.position();
         symbol.linetype = refs.handle(h).value;
+    }
+    if (r.type == 57 && catalog) {
+        if (v < 1021) main.bits(1);
+        main.bit_short();
+        if (v < 1021) main.bits(1);
+        text(); // description
+        main.bit_double(); // total pattern length
+        main.bits(8); // alignment
+        const unsigned count = main.bits(8);
+        std::vector<double> segments;
+        bool simple = true;
+        for (unsigned i = 0; i < count; ++i) {
+            segments.push_back(main.bit_double());
+            main.bit_short(); // shape number
+            main.raw_double(); main.raw_double(); // x/y offset
+            main.bit_double(); main.bit_double(); // scale/rotation
+            if (main.bit_short() != 0) simple = false;
+        }
+        if (simple) catalog->simple_linetypes.emplace(symbol.name, std::move(segments));
     }
     if (r.type != 49)
         return symbol;
@@ -804,7 +876,8 @@ DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint6
         *positions = {r.main_bits, r.split_field_bit, count_pos, main.position(), 0, 0, flags != 0};
     require(members >= 0 && std::size_t(members) <= (body.size() * 8 - r.main_bits) / 8,
             "Invalid DWG block member count");
-    read_vector(main);
+    symbol.base_point = read_vector(main);
+    symbol.external_block = flags != 0;
     text();
     std::size_t inserts = 0;
     if (v >= 1015) {
@@ -840,6 +913,52 @@ DwgSymbolRecord read_symbol(std::string_view body, DwgR2000Record &r, std::uint6
 #include "dwg_classes.inc"
 #include "dwg_history_read.inc"
 #include "dwg_dynamic.inc"
+
+DwgLwPolyline read_lwpolyline(std::string_view body, DwgR2000Record &record,
+                              std::uint64_t handle, unsigned version, const char *page) {
+    auto stream = open_dynamic(body, record, handle, version, page);
+    auto &main = stream.main;
+    DwgLwPolyline poly;
+    poly.properties = read_entity_properties(main, stream.refs, handle, stream.end, version, record);
+    const auto flags = main.bit_short();
+    poly.plinegen = (flags & 0x100) != 0;
+    poly.closed = (flags & 0x200) != 0;
+    if (flags & 4) poly.constant_width = stream.real();
+    if (flags & 8) poly.elevation = stream.real();
+    if (flags & 2) poly.thickness = stream.real();
+    if (flags & 1) poly.normal = stream.vec();
+
+    const auto count = main.bit_long();
+    const auto bulges = flags & 0x10 ? main.bit_long() : 0;
+    const auto ids = flags & 0x400 ? main.bit_long() : 0;
+    const auto widths = flags & 0x20 ? main.bit_long() : 0;
+    require(count >= 0 && bulges >= 0 && bulges <= count && ids >= 0 && ids <= count &&
+            widths >= 0 && widths <= count, "Invalid LWPOLYLINE array counts");
+    // The first XY pair is raw. R2000+ encodes later points relative to the preceding vertex.
+    const auto point_bits = count ? 128ULL + (count - 1ULL) * (version < 1015 ? 128 : 4) : 0;
+    require(point_bits + 2ULL * bulges + 2ULL * ids + 4ULL * widths <= main.remaining(),
+            "LWPOLYLINE arrays exceed the entity stream");
+    poly.vertices.resize(count);
+    for (int i = 0; i < count; ++i) {
+        auto &v = poly.vertices[i];
+        if (i == 0 || version < 1015) {
+            v.x = main.raw_double();
+            v.y = main.raw_double();
+        } else {
+            const auto &previous = poly.vertices[i - 1];
+            v.x = main.default_double(previous.x);
+            v.y = main.default_double(previous.y);
+        }
+    }
+    for (int i = 0; i < bulges; ++i) poly.vertices[i].bulge = stream.real();
+    for (int i = 0; i < ids; ++i) poly.vertices[i].vertex_id = main.bit_long();
+    for (int i = 0; i < widths; ++i) {
+        poly.vertices[i].start_width = stream.real();
+        poly.vertices[i].end_width = stream.real();
+    }
+    return poly;
+}
+
 #include "dwg_associative.inc"
 #include "dwg_arch_read.inc"
 #include "dwg_class_object.inc"
@@ -910,7 +1029,7 @@ DwgR2000Objects decode_objects(std::string_view file, const DwgR2000Index &index
         DwgR2000Record record{};
         bool have_frame = false;
         try {
-            record = read_record(file.substr(offset, end - offset), offset, handle, version);
+            record = read_record(file.substr(offset, end - offset), offset, handle, version, classes);
             have_frame = true;
             auto body = file.substr(record.body_offset, record.body_size);
             if (basic_geometry(record.type))
@@ -920,7 +1039,7 @@ DwgR2000Objects decode_objects(std::string_view file, const DwgR2000Index &index
             else if (record.type == 48)
                 read_symbol(body, record, handle, version, page, nullptr, &result);
             else if (named_table(record.type))
-                result.symbols.emplace(handle, read_symbol(body, record, handle, version, page));
+                result.symbols.emplace(handle, read_symbol(body, record, handle, version, page, nullptr, &result));
         } catch (const std::invalid_argument &error) {
             if (!stats)
                 throw;
@@ -998,6 +1117,117 @@ DwgR2000Objects decode_objects(std::string_view file, const DwgR2000Index &index
                                            classes[record.type - 500]);
             } catch (const std::exception &e) {
                 result.arch_errors[handle] = e.what();
+            }
+        }
+        if ((record.type >= 20 && record.type <= 26) || record.type == 31 || record.type == 32) {
+            try {
+                auto r = open_dynamic(file.substr(record.body_offset, record.body_size), record, handle, version, page);
+                auto properties = read_entity_properties(r.main, r.refs, handle, r.end, version, record);
+                if (record.type == 31 || record.type == 32) {
+                    DwgSolid solid;
+                    solid.properties = properties;
+                    if (version < 1015 || !r.main.bits(1)) solid.thickness = r.real();
+                    double z = r.real();
+                    for (auto &p : solid.corners) { auto xy = r.raw2(); p = {xy.x,xy.y,z}; }
+                    if (version < 1015 || !r.main.bits(1)) solid.normal = r.vec();
+                    result.solids.emplace(handle, std::move(solid));
+                } else {
+                    DwgDimension dim;
+                    dim.properties = properties;
+                    auto &d = dim.definition;
+                    if (version >= 1024) r.main.bits(8);
+                    d.normal = r.vec();
+                    auto middle = r.raw2();
+                    d.text_middle_point = {middle.x, middle.y, r.real()};
+                    d.text_user_positioned = !(r.main.bits(8) & 1);
+                    d.text_override = r.str();
+                    d.text_rotation = r.real();
+                    d.horizontal_direction = r.real();
+                    dim.insertion_scale = r.vec();
+                    d.insertion_rotation = r.real();
+                    if (version >= 1015) {
+                        d.attachment_point = r.main.bit_short();
+                        d.line_spacing_style = r.main.bit_short();
+                        d.line_spacing_factor = r.real();
+                        auto measurement = r.real();
+                        if (measurement >= 0) d.actual_measurement = measurement;
+                    }
+                    if (version >= 1021) {
+                        r.main.bits(1);
+                        d.flip_arrow1 = r.main.bits(1);
+                        d.flip_arrow2 = r.main.bits(1);
+                    }
+                    auto insertion = r.raw2();
+                    d.insertion_point = {insertion.x, insertion.y, 0};
+                    dim.style = r.href();
+                    dim.graphics_block = r.href();
+                    switch (record.type) {
+                    case 20: {
+                        d.definition_point = r.vec();
+                        d.geometry = OrdinateDimension{r.vec(), r.vec(), r.main.bits(8) == 1};
+                        break;
+                    }
+                    case 21: case 22: {
+                        auto first = r.vec(), second = r.vec();
+                        d.definition_point = r.vec();
+                        auto oblique = r.real();
+                        if (record.type == 21) d.geometry = LinearDimension{first, second, r.real(), oblique};
+                        else d.geometry = AlignedDimension{first, second, oblique};
+                        break;
+                    }
+                    case 23:
+                        d.definition_point = r.vec();
+                        d.geometry = Angular3PointDimension{r.vec(), r.vec(), r.vec()};
+                        break;
+                    case 24: {
+                        auto arc = r.raw2();
+                        d.geometry = Angular2LineDimension{r.vec(), r.vec(), r.vec(), {arc.x,arc.y,d.text_middle_point.z}};
+                        d.definition_point = r.vec();
+                        break;
+                    }
+                    case 25: case 26: {
+                        auto first = r.vec(), second = r.vec();
+                        if (record.type == 25) { d.definition_point = first; d.geometry = RadiusDimension{second,r.real()}; }
+                        else { d.definition_point = second; d.geometry = DiameterDimension{first,r.real()}; }
+                        break;
+                    }
+                    }
+                    result.dimensions.emplace(handle, std::move(dim));
+                }
+            } catch (const std::exception &e) { result.dimension_errors.emplace(handle,e.what()); }
+        }
+        if (is_lwpolyline(record.type, classes)) {
+            try {
+                auto body = file.substr(record.body_offset, record.body_size);
+                result.lwpolylines.emplace(handle, read_lwpolyline(body, record, handle, version, page));
+            } catch (const std::invalid_argument &error) {
+                result.lwpolyline_errors.emplace(handle, error.what());
+            }
+        }
+        if (record.type == 44) {
+            try {
+                auto stream = open_dynamic(file.substr(record.body_offset, record.body_size), record, handle, version, page);
+                DwgMText text;
+                text.properties = read_entity_properties(stream.main, stream.refs, handle, stream.end, version, record);
+                text.insertion = stream.vec();
+                text.normal = stream.vec();
+                text.x_direction = stream.vec();
+                text.width = stream.real();
+                if (version >= 1021) text.rectangle_height = stream.real();
+                text.height = stream.real();
+                text.attachment = stream.main.bit_short();
+                text.drawing_direction = stream.main.bit_short();
+                text.extents_height = stream.real();
+                text.extents_width = stream.real();
+                text.value = stream.str();
+                text.style = stream.href();
+                if (version >= 1015) {
+                    text.line_spacing_style = stream.main.bit_short();
+                    text.line_spacing_factor = stream.real();
+                }
+                result.mtexts.emplace(handle, std::move(text));
+            } catch (const std::exception &e) {
+                result.mtext_errors.emplace(handle, e.what());
             }
         }
         if (record.type == 7 || record.type == 8) {
@@ -1119,11 +1349,32 @@ DwgR2000Objects read_r12_geometry(std::string_view file) {
                 DwgBitReader row(body);
                 row.seek(35 * 8);
                 auto address = row.little_endian(4) & 0x3fffffff;
-                block_names.emplace(block_start + address, detail::from_legacy(name, page));
+                auto block_name = detail::from_legacy(name, page);
+                block_names.emplace(block_start + address, block_name);
+                auto &symbol = result.legacy_blocks[block_name];
+                symbol.type = 49;
+                symbol.name = block_name;
+                symbol.external_block = (static_cast<unsigned char>(body.front()) & (4 | 8 | 16)) != 0;
             }
             // Deleted rows still occupy a slot. Never resolve their old name as a live layer or linetype.
             bool deleted=(static_cast<unsigned char>(body.front())&128)!=0;
-            result.legacy_symbol_names[kinds[i]].push_back(deleted?std::string{}:detail::from_legacy(name,page));
+            const auto live_name = deleted ? std::string{} : detail::from_legacy(name, page);
+            result.legacy_symbol_names[kinds[i]].push_back(live_name);
+            if (kinds[i] == 51 && !deleted) {
+                DwgBitReader row(body);
+                row.seek(35 * 8); // flags, fixed name and xref index
+                const int value = static_cast<int>(row.little_endian(2));
+                result.layer_colors[live_name] = Color::from_index(value < 32768 ? value : value - 65536);
+                if (body.size() >= 39) result.legacy_layer_linetypes[live_name] = row.little_endian(2);
+            } else if (kinds[i] == 57 && !deleted && body.size() >= 93) {
+                const auto n = static_cast<unsigned char>(body[84]);
+                if (n <= (body.size()-93)/8) {
+                    DwgBitReader row(body);
+                    row.seek(93*8);
+                    auto &segments = result.simple_linetypes[live_name];
+                    for (unsigned k=0; k<n; ++k) segments.push_back(row.raw_double());
+                }
+            }
         }
     }
     struct Stream {
@@ -1202,7 +1453,7 @@ DwgR2000Objects read_r12_geometry(std::string_view file) {
                         block.reset();
                     } else if (root == 1)
                         require(block.has_value(), "AC1009 entity outside block");
-                    if (type != 12 && type != 13) {
+                    if (type != 13) {
                         DwgBitReader r(data);
                         r.seek(32);
                         DwgR2000EntityProperties props;
@@ -1227,101 +1478,184 @@ DwgR2000Objects read_r12_geometry(std::string_view file) {
                         double elevation = (flags & 4) && !is3d ? r.raw_double() : 0;
                         auto thickness_bit = r.position();
                         double thickness = flags & 8 ? r.raw_double() : 0;
-                        require(flags & 32, "AC1009 entity lacks stored handle");
-                        auto width = r.bits(8);
+                        require(type == 12 || (flags & 32), "AC1009 entity lacks stored handle");
+                        auto width = (flags & 32) ? r.bits(8) : 0;
                         require(width <= 8, "Oversized AC1009 handle");
-                        auto h = r.bits(width * 8);
+                        auto h = width ? r.bits(width * 8) : 0;
                         if (extra & 4)
                             r.little_endian(2);
-                        require(h && result.records
-                                         .emplace(h, DwgR2000Record{std::size_t(offset), std::size_t(offset),
-                                                                    data.size(),
-                                                                    static_cast<std::int16_t>(type), 0, 0, 0})
-                                         .second,
-                                "Duplicate or null AC1009 handle");
-                        result.legacy_entity_properties.emplace(h, props);
-                        if (sequence) {
-                            auto parent_type = result.records.at(sequence).type;
-                            if (type == 17 || type == (parent_type == 19 ? 20 : 16))
-                                result.legacy_sequences.at(sequence).push_back(h);
-                            else sequence = 0;
-                            if (type == 17) sequence = 0;
-                        }
-                        if (type == 19 || (type == 14 && (flags & 128))) {
-                            sequence = h;
-                            result.legacy_sequences[h] = {h};
-                        }
-                        auto &record = result.records.at(h);
-                        record.color_bit = color_bit;
-                        record.linetype_bit = linetype_bit;
-                        record.elevation_bit = elevation_bit;
-                        record.thickness_bit = thickness_bit;
-                        record.geometry_start = r.position();
-                        auto point = [&](bool z, double fallback) {
-                            return Point3{r.raw_double(), r.raw_double(), z ? r.raw_double() : fallback};
-                        };
-                        auto normal = [&]() { return options & 1 ? point(true, 0) : Vector3::UNIT_Z; };
-                        if (type == 1 || type == 21) {
-                            auto &line = result.lines[h];
-                            line.properties = props;
-                            line.start = point(!(flags & 4), 0);
-                            line.end = point(!(flags & 4), 0);
-                            line.thickness = thickness;
-                            line.normal = normal();
-                        } else if (type == 3 || type == 8) {
-                            DwgCircle &c =
-                                type == 3 ? result.circles[h] : static_cast<DwgCircle &>(result.arcs[h]);
-                            c.properties = props;
-                            c.center = point(false, elevation);
-                            result.records.at(h).geometry_bit = r.position();
-                            c.radius = r.raw_double();
-                            c.thickness = thickness;
-                            if (type == 8) {
-                                auto &arc = result.arcs.at(h);
-                                arc.start_angle = r.raw_double();
-                                arc.end_angle = r.raw_double();
+                        if (type == 12) {
+                            result.legacy_blocks.at(*block).base_point = {r.raw_double(), r.raw_double(), elevation};
+                        } else {
+                            require(h && result.records
+                                             .emplace(h, DwgR2000Record{std::size_t(offset), std::size_t(offset),
+                                                                        data.size(),
+                                                                        static_cast<std::int16_t>(type), 0, 0, 0})
+                                             .second,
+                                    "Duplicate or null AC1009 handle");
+                            result.legacy_entity_properties.emplace(h, props);
+                            if (sequence) {
+                                auto parent_type = result.records.at(sequence).type;
+                                if (type == 17 || type == (parent_type == 19 ? 20 : 16))
+                                    result.legacy_sequences.at(sequence).push_back(h);
+                                else sequence = 0;
+                                if (type == 17) sequence = 0;
                             }
-                            c.normal = normal();
+                            if (type == 19 || (type == 14 && (flags & 128))) {
+                                sequence = h;
+                                result.legacy_sequences[h] = {h};
+                            }
+                            auto &record = result.records.at(h);
+                            record.color_bit = color_bit;
+                            record.linetype_bit = linetype_bit;
+                            record.elevation_bit = elevation_bit;
+                            record.thickness_bit = thickness_bit;
+                            record.geometry_start = r.position();
+                            auto point = [&](bool z, double fallback) {
+                                return Point3{r.raw_double(), r.raw_double(), z ? r.raw_double() : fallback};
+                            };
+                            auto normal = [&]() { return options & 1 ? point(true, 0) : Vector3::UNIT_Z; };
+                            if (type == 9 || type == 11 || type == 23) {
+                                try {
+                                    if (type == 9 || type == 11) {
+                                        DwgSolid solid;
+                                        solid.properties = props;
+                                        solid.thickness = thickness;
+                                        for (auto &corner : solid.corners) corner = point(false,elevation);
+                                        solid.normal = normal();
+                                        result.solids.emplace(h,std::move(solid));
+                                    } else if (type == 23) {
+                                        DwgDimension dim;
+                                        dim.properties = props;
+                                        auto &d = dim.definition;
+                                        auto slot = r.little_endian(2);
+                                        const auto &blocks = result.legacy_symbol_names[49];
+                                        if (slot < blocks.size()) d.block_name = blocks[slot];
+                                        d.definition_point = point(true,0);
+                                        d.text_middle_point = point(false,elevation);
+                                        if (options & 1) d.insertion_point = point(false,elevation);
+                                        unsigned flags = options & 2 ? r.bits(8) : 0;
+                                        d.text_user_positioned = (flags & 128) != 0;
+                                        if (options & 4) {
+                                            auto n = r.little_endian(2);
+                                            std::string label;
+                                            for (std::size_t i=0;i<n;++i) label.push_back(char(r.bits(8)));
+                                            while (!label.empty() && label.back() == 0) label.pop_back();
+                                            d.text_override = detail::from_legacy(label,page);
+                                        }
+                                        Point3 a{}, b{}, c{}, arc{};
+                                        if (options & 8) a = point(true,elevation);
+                                        if (options & 16) b = point(true,elevation);
+                                        if (options & 32) c = point(true,elevation);
+                                        if (options & 64) arc = point(false,elevation);
+                                        double leader = options & 128 ? r.raw_double() : 0;
+                                        double rotation = options & 256 ? r.raw_double() : 0;
+                                        double oblique = (options & 512) && !(flags & 7) ? r.raw_double() : 0;
+                                        if (options & 1024) d.text_rotation = r.raw_double();
+                                        if (options & 0x4000) d.normal = point(true,0);
+                                        if (options & 0x8000) {
+                                            auto style = r.little_endian(2);
+                                            const auto &names = result.legacy_symbol_names[69];
+                                            if (style < names.size()) d.style_name = names[style];
+                                        }
+                                        switch (flags & 7) {
+                                        case 0: d.geometry = LinearDimension{a,b,rotation,oblique}; break;
+                                        case 1: d.geometry = AlignedDimension{a,b,0}; break;
+                                        case 2: d.geometry = Angular2LineDimension{a,b,c,arc}; break;
+                                        case 3: d.geometry = DiameterDimension{c,leader}; break;
+                                        case 4: d.geometry = RadiusDimension{c,leader}; break;
+                                        case 5: d.geometry = Angular3PointDimension{a,b,c}; break;
+                                        case 6: d.geometry = OrdinateDimension{a,b,bool(flags & 64)}; break;
+                                        }
+                                        result.dimensions.emplace(h,std::move(dim));
+                                    }
+                                } catch (const std::exception &e) {
+                                    result.dimension_errors.emplace(h, e.what());
+                                }
+                            } else if (type == 14) {
+                                auto slot = r.little_endian(2);
+                                const auto &names = result.legacy_symbol_names[49];
+                                if (slot >= names.size() || names[slot].empty()) {
+                                    result.insert_errors[h] = "Missing AC1009 INSERT block";
+                                } else {
+                                    auto &insert = result.inserts[h];
+                                    insert.properties = props;
+                                    insert.legacy_block_name = names[slot];
+                                    insert.has_attributes = (flags & 128) != 0;
+                                    insert.insertion = point(false, elevation);
+                                    if (options & 1) insert.scale.x = r.raw_double();
+                                    if (options & 2) insert.scale.y = r.raw_double();
+                                    if (options & 4) insert.rotation = r.raw_double();
+                                    if (options & 8) insert.scale.z = r.raw_double();
+                                    if (options & 16) insert.columns = r.little_endian(2);
+                                    if (options & 32) insert.rows = r.little_endian(2);
+                                    if (options & 64) insert.column_spacing = r.raw_double();
+                                    if (options & 128) insert.row_spacing = r.raw_double();
+                                    if (options & 256) insert.normal = point(true, 0);
+                                    insert.minsert = insert.columns > 1 || insert.rows > 1;
+                                }
+                            } else if (type == 1 || type == 21) {
+                                auto &line = result.lines[h];
+                                line.properties = props;
+                                line.start = point(!(flags & 4), 0);
+                                line.end = point(!(flags & 4), 0);
+                                line.thickness = thickness;
+                                line.normal = normal();
+                            } else if (type == 3 || type == 8) {
+                                DwgCircle &c =
+                                    type == 3 ? result.circles[h] : static_cast<DwgCircle &>(result.arcs[h]);
+                                c.properties = props;
+                                c.center = point(false, elevation);
+                                result.records.at(h).geometry_bit = r.position();
+                                c.radius = r.raw_double();
+                                c.thickness = thickness;
+                                if (type == 8) {
+                                    auto &arc = result.arcs.at(h);
+                                    arc.start_angle = r.raw_double();
+                                    arc.end_angle = r.raw_double();
+                                }
+                                c.normal = normal();
+                            }
+                            if (type == 7) {
+                                auto &t = result.texts[h];
+                                t.flags = options;
+                                t.properties = props;
+                                t.thickness = thickness;
+                                t.insertion = point(false, elevation);
+                                record.position_end = r.position();
+                                t.height = r.raw_double();
+                                record.text_start = r.position();
+                                auto length = r.little_endian(2);
+                                std::string text;
+                                for (std::size_t i = 0; i < length; ++i)
+                                    text.push_back(char(r.bits(8)));
+                                while (!text.empty() && text.back() == 0)
+                                    text.pop_back();
+                                t.value = detail::from_legacy(text, drawing_code_page(file, 1009));
+                                record.text_end = r.position();
+                                if (options & 1)
+                                    t.rotation = r.raw_double();
+                                if (options & 2)
+                                    t.width_factor = r.raw_double();
+                                if (options & 4)
+                                    t.oblique_angle = r.raw_double();
+                                if (options & 8)
+                                    t.style = r.bits(8);
+                                if (options & 16)
+                                    t.generation = r.bits(8);
+                                if (options & 32)
+                                    t.horizontal = r.bits(8);
+                                t.has_alignment = options & 64;
+                                if (t.has_alignment)
+                                    t.alignment = point(false, elevation);
+                                if (options & 128)
+                                    t.normal = point(true, 0);
+                                if (options & 256)
+                                    t.vertical = r.bits(8);
+                            }
+                            if (type == 1 || type == 21 || type == 3 || type == 8 || type == 7)
+                                require(r.position() == data.size() * 8, "Unexpected AC1009 geometry fields");
                         }
-                        if (type == 7) {
-                            auto &t = result.texts[h];
-                            t.flags = options;
-                            t.properties = props;
-                            t.thickness = thickness;
-                            t.insertion = point(false, elevation);
-                            record.position_end = r.position();
-                            t.height = r.raw_double();
-                            record.text_start = r.position();
-                            auto length = r.little_endian(2);
-                            std::string text;
-                            for (std::size_t i = 0; i < length; ++i)
-                                text.push_back(char(r.bits(8)));
-                            while (!text.empty() && text.back() == 0)
-                                text.pop_back();
-                            t.value = detail::from_legacy(text, drawing_code_page(file, 1009));
-                            record.text_end = r.position();
-                            if (options & 1)
-                                t.rotation = r.raw_double();
-                            if (options & 2)
-                                t.width_factor = r.raw_double();
-                            if (options & 4)
-                                t.oblique_angle = r.raw_double();
-                            if (options & 8)
-                                t.style = r.bits(8);
-                            if (options & 16)
-                                t.generation = r.bits(8);
-                            if (options & 32)
-                                t.horizontal = r.bits(8);
-                            t.has_alignment = options & 64;
-                            if (t.has_alignment)
-                                t.alignment = point(false, elevation);
-                            if (options & 128)
-                                t.normal = point(true, 0);
-                            if (options & 256)
-                                t.vertical = r.bits(8);
-                        }
-                        if (type == 1 || type == 21 || type == 3 || type == 8 || type == 7)
-                            require(r.position() == data.size() * 8, "Unexpected AC1009 geometry fields");
                     }
                 }
                 if (at == streams[section].end)
@@ -1623,8 +1957,44 @@ std::string pack_record(unsigned version, const DwgBitWriter &main, std::size_t 
 struct NewEntity {
     std::uint64_t h, prev{}, next{};
     const DwgPrimitive *primitive;
+    std::uint64_t owner{}, insert_block{};
+    unsigned marker_type{};
+    std::string_view marker_name{};
 };
 void encode_geometry(DwgBitWriter &main, unsigned v, const DwgPrimitive &e) {
+    if (auto f = std::get_if<DwgFaceGeometry>(&e.geometry)) {
+        if (v < 1015) {
+            for (auto p : f->corners) vector_bits(main, p);
+        } else {
+            auto prev = f->corners.front();
+            main.bits(1, f->invisible_edges == 0);
+            main.bits(1, prev.z == 0);
+            raw_double(main, prev.x); raw_double(main, prev.y);
+            if (prev.z != 0) raw_double(main, prev.z);
+            auto delta = [&](double a, double b) {
+                main.bits(2, a == b ? 0 : 3);
+                if (a != b) raw_double(main, b);
+            };
+            for (std::size_t i = 1; i < 4; ++i) {
+                auto p = f->corners[i];
+                delta(prev.x, p.x); delta(prev.y, p.y); delta(prev.z, p.z);
+                prev = p;
+            }
+        }
+        if (v < 1015 || f->invisible_edges) main.bit_short(f->invisible_edges);
+        return;
+    }
+    if (auto ray = std::get_if<DwgRayGeometry>(&e.geometry)) {
+        vector_bits(main, ray->origin); vector_bits(main, ray->direction);
+        return;
+    }
+    if (auto p = std::get_if<DwgPointGeometry>(&e.geometry)) {
+        vector_bits(main, p->location);
+        if (v >= 1015) main.bits(1, 1); else main.bit_double(0);
+        if (v >= 1015) main.bits(1, 1); else vector_bits(main, Vector3::UNIT_Z);
+        main.bit_double(0);
+        return;
+    }
     if (auto l = std::get_if<DwgLineGeometry>(&e.geometry)) {
         if (v < 1015) {
             vector_bits(main, l->start);
@@ -1671,11 +2041,16 @@ void symbol_string(DwgBitWriter &, DwgBitWriter &, unsigned, std::string_view, c
 std::string finish_symbol(DwgBitWriter &, const DwgBitWriter &, const DwgBitWriter &, unsigned, std::size_t);
 std::string new_record(unsigned v, const NewEntity &entry, std::uint64_t style, const char *page,
                        unsigned modeler_type = 0, std::uint64_t layer = 16,
-                       const DwgSurface *surface = nullptr) {
+                       const DwgSurface *surface = nullptr, unsigned lt_mode = 0, std::uint64_t lt_handle = 0) {
     auto &e = *entry.primitive;
     DwgBitWriter main, handles;
     auto text = std::get_if<DwgTextGeometry>(&e.geometry);
     unsigned type = modeler_type ? modeler_type : text ? 1 : 19 - e.geometry.index();
+    if (std::holds_alternative<DwgFaceGeometry>(e.geometry)) type = 28;
+    if (std::holds_alternative<DwgPointGeometry>(e.geometry)) type = 27;
+    if (auto ray = std::get_if<DwgRayGeometry>(&e.geometry)) type = ray->infinite ? 41 : 40;
+    if (std::holds_alternative<InsertDefinition>(e.geometry)) type = 7;
+    if (entry.marker_type) type = entry.marker_type;
     if (v >= 1024) {
         if (type < 256) {
             main.bits(2, 0);
@@ -1700,7 +2075,8 @@ std::string new_record(unsigned v, const NewEntity &entry, std::uint64_t style, 
         split = main.position();
         main.little_endian(4, 0);
     }
-    main.bits(2, e.paper_space ? 1 : 2);
+    main.bits(2, entry.owner ? 0 : e.paper_space ? 1 : 2);
+    if (entry.owner) handles.absolute_handle(4, entry.owner);
     main.bit_long(0);
     if (v >= 1018)
         main.bits(1, 1);
@@ -1717,11 +2093,16 @@ std::string new_record(unsigned v, const NewEntity &entry, std::uint64_t style, 
         handles.absolute_handle(4, entry.prev);
         handles.absolute_handle(4, entry.next);
     }
-    main.bit_short(256);
-    main.bit_double(1);
+    auto rgb = e.color.to_true_color_value();
+    if (v >= 1018 && rgb) {
+        main.bit_short(0x8000);
+        main.bit_long(static_cast<std::int32_t>(0xc2000000u | *rgb));
+    } else main.bit_short(e.color.approximate_index());
+    main.bit_double(e.linetype_scale);
     if (v >= 1015) {
         handles.absolute_handle(5, layer);
-        main.bits(2, 0);
+        main.bits(2, lt_mode);
+        if (lt_mode == 3) handles.absolute_handle(5, lt_handle);
         if (v >= 1021) {
             main.bits(2, 0);
             main.bits(8, 0);
@@ -1733,6 +2114,30 @@ std::string new_record(unsigned v, const NewEntity &entry, std::uint64_t style, 
     main.bit_short(0);
     if (v >= 1015)
         main.bits(8, 29);
+    if (entry.marker_type == 4) {
+        DwgBitWriter strings;
+        symbol_string(main, strings, v, entry.marker_name, page);
+        return finish_symbol(main, strings, handles, v, split);
+    }
+    if (entry.marker_type == 5) {
+        main.bits(1, 0);
+        return pack_record(v, main, split, handles);
+    }
+    if (auto insert = std::get_if<InsertDefinition>(&e.geometry)) {
+        vector_bits(main, insert->insertion);
+        main.bits(2, 0);
+        raw_double(main, insert->scale.x);
+        for (double scale : {insert->scale.y, insert->scale.z}) {
+            main.bits(2, 3);
+            raw_double(main, scale);
+        }
+        main.bit_double(insert->rotation);
+        vector_bits(main, insert->normal);
+        main.bits(1, 0); // No attached attributes.
+        handles.absolute_handle(5, entry.insert_block);
+        main.bits(1, 0); // No string stream.
+        return pack_record(v, main, split, handles);
+    }
     if (text) {
         DwgBitWriter strings;
         if (v < 1015) {
@@ -1934,6 +2339,21 @@ std::string create_r12(std::string_view defaults, const std::vector<NewEntity> &
 void check_geometry(const DwgPrimitive &e) {
     auto finite = [](Point3 p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); };
     require(finite(e.normal) && e.normal != Vector3::ZERO && std::isfinite(e.thickness), "Invalid extrusion");
+    if (auto i = std::get_if<InsertDefinition>(&e.geometry)) {
+        require(!i->block_name.empty() && finite(i->insertion) && finite(i->normal) && i->normal.length() > 0 &&
+                finite(i->scale) && i->scale.x && i->scale.y && i->scale.z && std::isfinite(i->rotation) &&
+                i->columns == 1 && i->rows == 1, "Invalid DWG INSERT");
+        return;
+    }
+    if (auto face = std::get_if<DwgFaceGeometry>(&e.geometry)) {
+        for (auto p : face->corners) require(finite(p), "Invalid 3DFACE");
+        return;
+    }
+    if (auto p = std::get_if<DwgPointGeometry>(&e.geometry)) { require(finite(p->location), "Invalid POINT"); return; }
+    if (auto r = std::get_if<DwgRayGeometry>(&e.geometry)) {
+        require(finite(r->origin) && finite(r->direction) && r->direction != Vector3::ZERO, "Invalid ray direction");
+        return;
+    }
     if (auto l = std::get_if<DwgLineGeometry>(&e.geometry)) {
         require(finite(l->start) && finite(l->end), "Invalid LINE");
         return;
@@ -2687,32 +3107,177 @@ std::string detail::set_dwg_entity_color(std::string_view file, const DwgR2000Ob
 }
 
 #include "dwg_layer.inc"
+
+double DwgDocument::drawing_linetype_scale() const {
+    const auto file = source_bytes();
+    const auto v = unsigned(dxf_version_from_string(file.substr(0, 6)));
+    double scale = 1;
+    try {
+        if (v == 1009) {
+            DwgBitReader reader(file);
+            // Fixed header variable in AC1009, immediately after DRAGMODE.
+            reader.seek(0x132 * 8);
+            scale = reader.raw_double();
+        } else {
+            std::string storage;
+            std::string_view header;
+            if (v >= 1018) {
+                storage = read_dwg_paged_section(file, "AcDb:Header");
+                header = storage;
+            } else {
+                const auto loc = read_linear_directory(file).sections.at(0);
+                header = file.substr(loc.offset, loc.size);
+            }
+            const auto data = dwg_header_payload(header, v);
+            DwgBitReader reader(data);
+            reader.seek(variable_position(data, v, HeaderVariable::LinetypeScale));
+            scale = reader.bit_double();
+        }
+    } catch (const std::invalid_argument &) {
+        return 1; // A recovered drawing may have geometry without a usable header.
+    } catch (const std::out_of_range &) {
+        return 1;
+    }
+    return std::isfinite(scale) && scale > 0 ? scale : 1;
+}
+
 #include "dwg_lifecycle.inc"
 #include "dwg_read.inc"
 #include "dwg_recover.inc"
 #include "dwg_text_write.inc"
-std::string create_dwg(DxfVersion version, const std::vector<DwgPrimitive> &entities) {
-    auto defaults = standard_drawing(version);
+struct NewBlock {
+    std::uint64_t header;
+    std::vector<std::uint64_t> members, references;
+};
+
+static std::string encode_block_header(unsigned v, const NewBlock &block, std::string_view name,
+                                       std::uint64_t control, const char *page) {
+    DwgBitWriter main, refs, strings;
+    const auto split = start_symbol(main, refs, v, 49, block.header, control);
+    symbol_name(main, strings, v, name, page);
+    main.bits(5, 0); // Named block, no attributes or XREF.
+    main.bit_long(block.members.size());
+    vector_bits(main, Point3{});
+    symbol_string(main, strings, v, "", page);
+    for (std::size_t i = 0; i < block.references.size(); ++i) main.bits(8, 1);
+    main.bits(8, 0);
+    symbol_string(main, strings, v, "", page);
+    main.bit_long(0); // No preview.
+    main.bit_short(0); // Inherit drawing units.
+    main.bits(1, 1); // Explodable.
+    main.bits(8, 0); // Allow nonuniform scaling.
+    refs.absolute_handle(5, 0);
+    refs.absolute_handle(3, block.header + 1);
+    for (auto h : block.members) refs.absolute_handle(3, h);
+    refs.absolute_handle(3, block.header + 2);
+    for (auto h : block.references) refs.absolute_handle(4, h);
+    refs.absolute_handle(5, 0);
+    return finish_symbol(main, strings, refs, v, split);
+}
+
+// Change only the display flags and CMC in the template’s built-in layer record.
+static std::string style_template_layer(std::string_view body, const DwgR2000Record &r,
+                                        const DwgLayerDefinition &layer, unsigned version, std::uint64_t linetype) {
+    DwgBitReader old(body);
+    DwgBitWriter main, refs;
+    copy_until(main, old, r.layer_flags_bit);
+    const auto flags = old.bit_short();
+    main.bit_short((flags & ~2) | (layer.off ? 2 : 0));
+    read_packed_cm_color(old, [] { return std::string{}; });
+    write_layer_cmc(main, layer.color);
+    copy_until(main, old, r.main_bits);
+    copy_until(refs, old, r.linetype_bit);
+    old.handle(16);
+    refs.absolute_handle(5, linetype);
+    copy_until(refs, old, body.size() * 8 - (8 - r.main_bits % 8) % 8);
+    return pack_record(version, main, r.split_field_bit, refs);
+}
+
+static std::string create_from_defaults(DxfVersion version, std::string_view defaults,
+                                        const std::vector<DwgPrimitive> &entities,
+                                        const std::vector<std::string> &block_names = {},
+                                        const std::vector<DwgLayerDefinition> &layer_defs = {},
+                                        const std::map<std::string, std::vector<double>> &patterns = {}) {
     auto v = unsigned(version);
-    if (entities.empty())
+    if (entities.empty() && block_names.empty() && layer_defs.empty() && patterns.empty())
         return std::string(defaults);
     std::vector<NewEntity> entries;
     std::vector<std::uint64_t> space[2];
     // Default documents reserve all handles below 0x100 and use HANDSEED 0x10000000.
     require(entities.size() <= 0x10000000 - 0x100, "Too many DWG entities");
+    require(block_names.empty() || v == 1032, "Named DWG blocks require R2018");
+    require(block_names.size() <= (0x10000000 - 0x100 - entities.size()) / 3, "Too many DWG blocks");
+    std::map<std::string, NewBlock> blocks;
+    std::set<std::u32string> names;
+    std::vector<std::uint64_t> headers;
+    for (const auto &name : block_names) {
+        require(!name.empty() && name.front() != '*' && names.insert(detail::symbol_name_key(name)).second,
+                "Invalid or duplicate block name");
+        auto header = 0x100 + entities.size() + 3 * blocks.size();
+        blocks.emplace(name, NewBlock{header, {}, {}});
+        headers.push_back(header);
+    }
+    std::map<std::string, std::uint64_t> layers{{"0", 16}};
+    std::vector<std::uint64_t> layer_ids;
+    std::set<std::u32string> layer_names;
+    const DwgLayerDefinition *zero = nullptr;
+    auto next_layer = 0x100 + entities.size() + 3 * blocks.size();
+    require(layer_defs.size() <= 0x10000000 - next_layer, "Too many DWG layers");
+    for (const auto &layer : layer_defs) {
+        require(!layer.name.empty() && layer_names.insert(detail::symbol_name_key(layer.name)).second &&
+                layer.color.rgb().has_value(), "Invalid or duplicate DWG layer");
+        if (layer.name == "0") zero = &layer;
+        else {
+            layers.emplace(layer.name, next_layer);
+            layer_ids.push_back(next_layer++);
+        }
+    }
+    std::string seeded;
     for (auto &e : entities) {
         check_geometry(e);
+        require(v != 1009 || (e.geometry.index() < 4 && e.layer == "0" && e.color == Color::by_layer()),
+                "Selected primitive or style requires R13 or newer");
+        if (!layers.count(e.layer)) {
+            std::uint64_t id = 0;
+            seeded = detail::add_dwg_layer(defaults, read_dwg_objects(defaults), e.layer, 7, id);
+            defaults = seeded;
+            layers.emplace(e.layer, id);
+        }
         auto h = 0x100 + entries.size();
-        auto &members = space[e.paper_space];
+        auto owner = blocks.find(e.block_name);
+        require(e.block_name.empty() || (owner != blocks.end() && !e.paper_space), "Unknown block owner");
+        std::uint64_t target = 0;
+        if (auto i = std::get_if<InsertDefinition>(&e.geometry)) {
+            auto it = blocks.find(i->block_name);
+            require(it != blocks.end(), "Unknown INSERT block");
+            it->second.references.push_back(h);
+            target = it->second.header;
+        }
+        auto &members = owner == blocks.end() ? space[e.paper_space] : owner->second.members;
         auto prev = members.empty() ? 0 : members.back();
         if (prev)
             entries.at(prev - 0x100).next = h;
         members.push_back(h);
-        entries.push_back({h, prev, 0, &e});
+        entries.push_back({h, prev, 0, &e, owner == blocks.end() ? 0 : owner->second.header, target});
     }
     if (v == 1009)
         return create_r12(defaults, entries);
     auto original = read_dwg_objects(defaults);
+    std::map<std::u32string,std::uint64_t> linetypes;
+    for (const auto &[h,symbol] : original.symbols)
+        if (symbol.type == 57) linetypes.emplace(detail::symbol_name_key(symbol.name), h);
+    require(patterns.size() <= 0x10000000 - next_layer, "Too many DWG linetypes");
+    std::vector<std::uint64_t> type_ids;
+    for (const auto &[name,segments] : patterns) {
+        require(!name.empty() && segments.size() <= 255 &&
+                linetypes.emplace(detail::symbol_name_key(name), next_layer).second, "Invalid or duplicate DWG linetype");
+        type_ids.push_back(next_layer++);
+    }
+    const auto type_handle = [&](const std::string &name) {
+        auto it = linetypes.find(detail::symbol_name_key(name));
+        require(it != linetypes.end(), "Unknown DWG linetype");
+        return it->second;
+    };
     auto paged = v >= 1018;
     std::string storage;
     std::string_view source = defaults;
@@ -2734,6 +3299,7 @@ std::string create_dwg(DxfVersion version, const std::vector<DwgPrimitive> &enti
     std::string bytes;
     std::size_t cursor = start;
     std::map<std::uint64_t, std::size_t> offsets;
+    std::uint64_t block_control = 0, layer_control = 0, type_control = 0;
     for (auto [offset, h] : order) {
         auto r = original.records.at(h);
         bytes.append(source.substr(cursor, offset - cursor));
@@ -2742,17 +3308,65 @@ std::string create_dwg(DxfVersion version, const std::vector<DwgPrimitive> &enti
         if ((h == 21 || h == 24) && !space[h == 24].empty()) {
             require(r.type == 49, "Invalid default block record");
             bytes += populate_block(v, source.substr(r.body_offset, r.body_size), r, h, space[h == 24]);
+        } else if (r.type == 56 && !type_ids.empty()) {
+            type_control = h;
+            bytes += extend_symbol_control(source.substr(r.body_offset, r.body_size), r, v, h, type_ids);
+        } else if (r.type == 50 && !layer_ids.empty()) {
+            layer_control = h;
+            bytes += extend_symbol_control(source.substr(r.body_offset, r.body_size), r, v, h, layer_ids);
+        } else if (h == layers.at("0") && zero) {
+            bytes += style_template_layer(source.substr(r.body_offset, r.body_size), r, *zero, v, type_handle(zero->linetype));
+        } else if (r.type == 48 && !blocks.empty()) {
+            block_control = h;
+            bytes += extend_symbol_control(source.substr(r.body_offset, r.body_size), r, v, h, headers);
         } else
             bytes.append(source.substr(offset, length));
         cursor = offset + length;
     }
-    for (auto &e : entries) {
+    std::uint64_t style = 0;
+    for (const auto &[id, symbol] : original.symbols)
+        if (symbol.type == 53 && detail::symbol_name_key(symbol.name) == U"STANDARD") style = id;
+    require(style, "Missing default text style");
+    const auto page = drawing_code_page(defaults, v);
+    for (const auto &e : entries) {
         require(offsets.emplace(e.h, start + bytes.size()).second, "Default DWG handle conflict");
-        std::uint64_t style = 0;
-        for (auto &[id, symbol] : original.symbols)
-            if (symbol.type == 53 && detail::symbol_name_key(symbol.name) == U"STANDARD") style = id;
-        require(style, "Missing default text style");
-        bytes += new_record(v, e, style, drawing_code_page(defaults, v));
+        const auto &name = e.primitive->linetype;
+        const auto key = detail::symbol_name_key(name);
+        const unsigned mode = key.empty() || key == U"BYLAYER" ? 0 : key == U"BYBLOCK" ? 1 : key == U"CONTINUOUS" ? 2 : 3;
+        require(!mode || v >= 1015, "Explicit linetype requires R2000 or newer");
+        require(std::isfinite(e.primitive->linetype_scale) && e.primitive->linetype_scale > 0, "Invalid linetype scale");
+        bytes += new_record(v, e, style, page, 0, layers.at(e.primitive->layer), nullptr, mode,
+                            mode == 3 ? type_handle(name) : 0);
+    }
+    if (!patterns.empty()) require(type_control, "Missing DWG linetype control");
+    for (const auto &[name,segments] : patterns) {
+        double length = 0;
+        for (const auto dash : segments) length += std::abs(dash);
+        require(std::isfinite(length), "Invalid DWG linetype pattern");
+        auto h = type_handle(name);
+        offsets.emplace(h,start + bytes.size());
+        bytes += encode_linetype(v,h,type_control,name,"",segments,length,page);
+    }
+    if (!layer_ids.empty()) {
+        require(layer_control, "Invalid drawing template layer table");
+        for (const auto &layer : layer_defs) {
+            if (layer.name == "0") continue;
+            auto h = layers.at(layer.name);
+            offsets.emplace(h, start + bytes.size());
+            bytes += encode_layer(v, h, layer_control, type_handle(layer.linetype), layer.name, page, layer.color, 31, layer.off);
+        }
+    }
+    if (!blocks.empty()) require(block_control, "Missing block table control");
+    const DwgPrimitive marker{DwgLineGeometry{}};
+    for (const auto &[name, block] : blocks) {
+        auto id = block.header;
+        offsets.emplace(id, start + bytes.size());
+        bytes += encode_block_header(v, block, name, block_control, page);
+        for (unsigned type : {4u, 5u}) {
+            auto h = id + type - 3;
+            offsets.emplace(h, start + bytes.size());
+            bytes += new_record(v, {h, 0, 0, &marker, id, 0, type, name}, style, page);
+        }
     }
     bytes.append(source.substr(cursor, end - cursor));
     auto map = write_map(offsets);
@@ -2787,4 +3401,30 @@ std::string create_dwg(DxfVersion version, const std::vector<DwgPrimitive> &enti
     set_crc(out, 0, 25 + 9 * idx.sections.size());
     return out;
 }
+
+std::string create_dwg(DxfVersion version, const std::vector<DwgPrimitive> &entities) {
+    return create_from_defaults(version, standard_drawing(version), entities);
+}
+
+std::string create_dwg(DwgTemplate drawing_template, const std::vector<DwgPrimitive> &entities) {
+    return create_dwg(drawing_template, entities, {});
+}
+
+std::string create_dwg(DwgTemplate drawing_template, const std::vector<DwgPrimitive> &entities,
+                       const std::vector<std::string> &block_names) {
+    return create_dwg(drawing_template, entities, block_names, {});
+}
+
+std::string create_dwg(DwgTemplate drawing_template, const std::vector<DwgPrimitive> &entities,
+                       const std::vector<std::string> &block_names, const std::vector<DwgLayerDefinition> &layers) {
+    return create_dwg(drawing_template, entities, block_names, layers, {});
+}
+
+std::string create_dwg(DwgTemplate drawing_template, const std::vector<DwgPrimitive> &entities,
+                       const std::vector<std::string> &block_names, const std::vector<DwgLayerDefinition> &layers,
+                       const std::map<std::string, std::vector<double>> &linetypes) {
+    require(drawing_template == DwgTemplate::R2018Inches, "Unknown DWG drawing template");
+    return create_from_defaults(DxfVersion::AC1032, byte_view(blank_AC1032_inches), entities, block_names, layers, linetypes);
+}
+
 } // namespace libopencad

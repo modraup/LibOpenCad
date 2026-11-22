@@ -40,6 +40,7 @@
 #include "sheet_set.hpp"
 #include "nested_copy.hpp"
 #include "vector.hpp"
+#include "lwvertex.hpp"
 #include "handle_reservation.hpp"
 
 #include <array>
@@ -130,6 +131,7 @@ private:
     friend class DxfObjectContext;
     friend class DxfSemanticEntity;
     friend class DxfSemanticObject;
+    friend class DxfLayer;
     friend class DxfLineType;
     friend class DxfLwPolyline;
     friend class DxfPolyline2D;
@@ -200,6 +202,7 @@ public:
 class DxfLayer : public DxfRecord {
 public:
     std::string name() const;
+    Color color() const; // True color (420) takes precedence over the indexed color.
     int signed_color_index() const; // Negative means the layer is switched off.
     void set_signed_color_index(int index);
     std::string linetype() const;
@@ -1102,13 +1105,6 @@ private:
     friend class DxfDocument;
 };
 
-struct LwVertex {
-    double x, y;
-    double bulge; // Outgoing segment, including last-to-first when closed.
-    double start_width, end_width;
-    int vertex_id;
-};
-
 class DxfLwPolyline : public DxfEntity {
 public:
     // Atomic geometry and world-XDATA edits. Offsets and mirror planes use WCS.
@@ -1233,6 +1229,7 @@ struct EntityOptions {
     // Nonempty selects a named block instead of space. The block must already exist.
     std::string block_name;
     std::string layout_name; // Mutually exclusive with block_name.
+    double linetype_scale = 1;
 };
 
 // Common symbol-table operations. Property values use UTF-8 strings or canonical
@@ -1527,6 +1524,7 @@ public:
     std::int16_t insertion_units() const noexcept { return insertion_units_; }
     // Header unit / plot-style fields used by field pictures. Defaults match
     // acadrust HeaderVariables: LUNITS=2, LUPREC=4, AUNITS=0, AUPREC=0, PSTYLEMODE=true.
+    double drawing_linetype_scale() const;
     std::int16_t linear_unit_format() const;
     std::int16_t linear_unit_precision() const;
     std::int16_t angular_unit_format() const;
@@ -1880,6 +1878,7 @@ public:
     // LINE/ARC/CIRCLE/ELLIPSE/POINT/RAY/XLINE/SOLID/3DFACE/SPLINE return no parts.
     // Other types and ambiguous/nonentity handles are rejected explicitly.
     std::vector<ExplodedPrimitive> explode_entity(std::string_view handle) const;
+    static std::vector<ExplodedPrimitive> explode_lwpolyline(const DxfLwPolyline& polyline);
     std::vector<ExplodedModelerPart> explode_modeler(std::uint64_t handle) const;
     std::optional<BlockEvaluationGraph> evaluation_graph(std::uint64_t object) const;
     std::optional<SolidHistoryOperation> solid_history_definition(std::uint64_t node) const;
@@ -1999,6 +1998,23 @@ public:
     // Omits caches, source path, handle allocation and raw file bytes.
     SemanticInventoryV1 semantic_inventory_v1() const;
 
+    // Physical BLOCK/ENDBLK membership, including R12 files without ownership
+    // handles. References are valid until the document is mutated.
+    template<class Fn> void for_each_block_member(Fn&& fn) const {
+        const DxfBlock* block = nullptr;
+        for (const auto& record : records_) {
+            if (auto* marker = std::get_if<DxfBlock>(&record)) {
+                block = marker;
+            } else if (auto* raw = std::get_if<DxfRecord>(&record);
+                       raw && (raw->type() == "ENDBLK" || raw->type() == "ENDSEC")) {
+                block = nullptr;
+            } else if (block) {
+                auto member = [&](const DxfEntity& entity) { fn(*block, entity); };
+                visit_record<DxfEntity>(record, member);
+            }
+        }
+    }
+
     // Visits typed records in file order, including entities inside named BLOCKS.
     // DxfEntity excludes structural BLOCK markers; query DxfBlock explicitly.
     template<class T, class Fn> void for_each(Fn&& fn) {
@@ -2080,6 +2096,7 @@ private:
     void set_header_point(std::string_view name, Point3 value);
     using Record = std::variant<DxfRecord, DxfModelerEntity, DxfDataObject, DxfObjectContext, DxfSemanticEntity, DxfSemanticObject, DxfDrawingObject, DxfClassObject, DxfExtendedEntity, DxfAuxiliaryObject, DxfProxyEntity, DxfProxyObject, DxfField, DxfFieldList, DxfMaterial, DxfShape, DxfRasterImage, DxfUnderlay, DxfImageDefinition, DxfUnderlayDefinition, DxfRasterVariables, DxfImageReactor, DxfCellStyleMap, DxfTableGeometry, DxfTableContent, DxfTable, DxfTableStyle, DxfMultiLeaderStyle, DxfMultiLeader, DxfMLineStyle, DxfMLine, DxfDimension, DxfHatch, DxfTolerance, DxfLeader, DxfLayout, DxfViewport, DxfBlockRecord, DxfLayer, DxfLineType, DxfLine, DxfPoint, DxfRay, DxfXLine, DxfSolid, DxfFace3D, DxfMesh, DxfSpline, DxfHelix, DxfMText, DxfBlock, DxfInsert, DxfCircle, DxfArc, DxfEllipse, DxfPolyline2D, DxfPolyline3D, DxfPolygonMesh, DxfPolyfaceMesh, DxfLwPolyline, DxfText, DxfAttribute>;
     bool mirror_entity_with_transform(std::uint64_t handle, const Transform& transform, MirrorOptions options);
+    static std::vector<ExplodedPrimitive> explode_record(const Record& record, DxfVersion version);
     std::vector<Record> extract_graphical_entities();
     void insert_graphical_entities(std::vector<Record> entities);
     bool owner_chain_reaches(std::uint64_t handle, std::uint64_t target) const;
