@@ -584,7 +584,7 @@ Public constructors remain wall/door/window only (`create_opening` / `create_sta
 
 `SatIntCurve`, `SatPCurve` and `SatSplineSurface` expose rational/nonrational control nets, shared subtype references, curve-on-surface support and offsets. Curve samples use De Boor evaluation; supported swept descriptions recover exact extrusion, rational revolution and linear-sum control nets. Unsupported descriptions return an empty optional. Sampling and expanded control/knot storage have resource limits; constructors reject invalid dimensions and nonfinite values before modifying the document.
 
-`add_spline_curve`, `add_spline_surface`, `add_offset_spline_surface` and `add_pcurve` construct native SAT/SAB records. `SplineNet` supplies tensor-product surface controls and full knot multiplicities. Views own snapshots; document-wide subtype lookups observe subsequent record edits.
+`add_spline_curve`, `add_spline_surface`, `add_offset_spline_surface` and `add_pcurve` construct native SAT/SAB records. `SplineNet` supplies tensor-product surface controls and full knot multiplicities. The codec accepts degrees through 64 and limits each stored knot run to degree plus one. Views own snapshots; document-wide subtype lookups observe subsequent record edits.
 
 Native primitive constructors create boxes, wedges, pyramids, cylinders, cones, spheres, tori and closed planar bodies. They are compared with Rust topology and SAT/SAB output. For example:
 
@@ -922,7 +922,7 @@ The native suite includes an SDK integration check that moves the installed pref
 
 ## Upstream and Contributing
 
-LibOpenCad is an independent C++ port. Source comparisons and test dependencies currently target acadrust commit [`52034a67`](https://github.com/hakanaktt/acadrust/tree/52034a673ff59bf6936ebf01ec794b07a97df246), package version 0.6.8. The inspected revision does not imply full feature parity; DWG coverage is limited to the documented operations, and Civil 3D remains outside the current scope. Source comments identify the corresponding Rust modules; further work is ported and tested module by module.
+LibOpenCad is an independent C++ port. The main Rust interoperability suite pins acadrust [`52034a67`](https://github.com/hakanaktt/acadrust/tree/52034a673ff59bf6936ebf01ec794b07a97df246), package version 0.6.8. The DXF multileader and layout changes, DWG ViewRep fixes, and ACIS spline bounds also follow changes through [`979fbde5`](https://github.com/hakanaktt/acadrust/tree/979fbde502c228325afeb907f8fffbcd15943337). See the documented operations for supported DWG and Civil 3D features. Source comments identify the corresponding Rust modules.
 
 Contributions of reproducible bug reports, anonymized drawings, tests, and code improvements are welcome. Include the file version, ASCII or binary encoding, a minimal reproducer, and expected behavior when reporting a problem. New format or entity support should include native tests and, where practical, Rust readback comparisons. Preserve source attribution and license notices when incorporating external code.
 

@@ -2,12 +2,24 @@
 use acadrust::{CadDocument, DxfWriter};
 use std::fmt::Write;
 
+pub(crate) fn add_default_layout_reactors(doc: &mut CadDocument) {
+    // The pinned writer predates the default layout reactor fix in fc980e82.
+    for object in doc.objects.values_mut() {
+        if let acadrust::objects::ObjectType::Layout(layout) = object {
+            if !layout.reactors.contains(&layout.owner) {
+                layout.reactors.push(layout.owner);
+            }
+        }
+    }
+}
+
 // The native Stage 6 ViewRep port explicitly registers these additional classes.
 // Keep their names, order and flags under the same strict Rust writer comparison
 // as the pinned defaults; do not ignore arbitrary differences in CLASSES.
 fn native_defaults() -> CadDocument {
     use acadrust::classes::{DxfClass, DxfClassCollection};
     let mut doc = CadDocument::new();
+    add_default_layout_reactors(&mut doc);
     let mut classes = DxfClassCollection::new();
     for class in doc.classes.iter() {
         let mut class = class.clone();

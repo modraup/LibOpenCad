@@ -4,7 +4,8 @@
 
 LibOpenCad is a native C++ port of selected functionality from
 [acadrust](https://github.com/hakanaktt/acadrust), licensed under MPL-2.0.
-The current reference revision is `52034a673ff59bf6936ebf01ec794b07a97df246` (acadrust 0.6.8).
+The main Rust test reference revision is `52034a673ff59bf6936ebf01ec794b07a97df246` (acadrust 0.6.8).
+The ACIS spline, DXF layout and multileader, and DWG ViewRep changes also draw on acadrust through `979fbde502c228325afeb907f8fffbcd15943337`.
 The embedded DWG defaults retain their original `0c3ae80d` provenance.
 Source comments identify the corresponding Rust modules; see [LICENSE](LICENSE).
 

@@ -286,7 +286,8 @@ ViewRep read_view_rep(DynamicStream &s) {
     value.style = s.href();
     return value;
 }
-ClassObjectData read_class_object_data(DynamicStream &s, std::string_view dxf_name, unsigned version) {
+ClassObjectData read_class_object_data(DynamicStream &s, std::string_view dxf_name, unsigned version,
+                                       bool *legacy_view_rep_sixth_value) {
     auto name = class_object_ascii_upper(dxf_name);
     if (name == "RENDERSETTINGS")
         return read_render_settings(s, false, version >= 1027);
@@ -757,14 +758,21 @@ ClassObjectData read_class_object_data(DynamicStream &s, std::string_view dxf_na
     if (name == "ACDBVIEWREPSOURCEMGR") {
         ViewRepSourceManager value;
         value.has_source = s.main.bits(1);
-        value.source = s.href();
+        if (value.has_source)
+            value.source = s.href();
         value.status = s.main.bit_long();
         return value;
     }
     if (name == "ACDBVIEWREPSTANDARD") {
         ViewRepStandard value;
-        value.values = {s.main.bit_long(), s.main.bit_long(), s.main.bit_long(),
-                        s.main.bit_long(), s.main.bit_long(), s.main.bit_long()};
+        for (std::size_t i = 0; i < value.values.size() - 1; ++i)
+            value.values[i] = s.main.bit_long();
+        // Older LibOpenCad files also wrote a sixth value before R2013.
+        const bool has_legacy_sixth = version < 1027 && s.main.remaining() != 0;
+        if (version >= 1027 || has_legacy_sixth)
+            value.values.back() = s.main.bit_long();
+        if (legacy_view_rep_sixth_value)
+            *legacy_view_rep_sixth_value = has_legacy_sixth;
         return value;
     }
     if (name == "ACDBVIEWREPORIENTATIONDEF")
@@ -896,7 +904,8 @@ ClassObjectData read_class_object_data(DynamicStream &s, std::string_view dxf_na
     return value;
 }
 ClassObject read_class_object_record(std::string_view body, DwgR2000Record &record, std::uint64_t h, unsigned v,
-                                     const char *page, const std::string &dxf_name) {
+                                     const char *page, const std::string &dxf_name,
+                                     bool *legacy_view_rep_sixth_value = nullptr) {
     require(v >= 1018, "Native DWG class objects require R2004+");
     auto s = open_dynamic(body, record, h, v, page);
     ClassObject out;
@@ -909,7 +918,7 @@ ClassObject read_class_object_record(std::string_view body, DwgR2000Record &reco
     out.reactors = common.reactors;
     if (common.extension_dictionary)
         out.xdictionary_handle = common.extension_dictionary;
-    out.data = read_class_object_data(s, dxf_name, v);
+    out.data = read_class_object_data(s, dxf_name, v, legacy_view_rep_sixth_value);
     out.source_version = static_cast<DxfVersion>(v);
     return out;
 }

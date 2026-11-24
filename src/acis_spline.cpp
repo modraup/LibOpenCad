@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // Port of acadrust entities/acis/types.rs: interpolated/UV curves and spline surfaces.
 #include <libopencad/acis.hpp>
+#include "acis_spline_limits.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -37,13 +38,17 @@ std::int64_t integer(const Tokens &t, std::size_t i) {
         throw DecodeFailure{};
     return *v;
 }
-std::size_t count(const Tokens &t, std::size_t i, bool clamp = false) {
+std::size_t count(const Tokens &t, std::size_t i) {
     auto n = integer(t, i);
-    if (clamp)
-        n = std::max<std::int64_t>(n, 0);
     if (n < 0 || std::uint64_t(n) > allocation_limit)
         throw DecodeFailure{};
     return std::size_t(n);
+}
+std::size_t spline_degree(const Tokens &t, std::size_t i) {
+    const auto degree = count(t, i);
+    if (degree > max_acis_spline_degree)
+        throw DecodeFailure{};
+    return degree;
 }
 bool spline(std::string_view s) { return s == "nubs" || s == "nurbs"; }
 bool surface(std::string_view s) {
@@ -115,17 +120,16 @@ bool closed(const Tokens &t) {
     auto v = token(t, *p + 2).as_integer();
     return id(t, *p + 2) == "closed" || id(t, *p + 2) == "periodic" || (v && *v != 0);
 }
-void repeat_knot(std::vector<double> &out, double k, std::size_t n) {
-    if (n > allocation_limit - out.size())
-        throw DecodeFailure{};
-    out.insert(out.end(), n, k);
-}
-std::vector<double> knots(const Tokens &t, std::size_t &pos, std::size_t n, bool clamp) {
+std::vector<double> knots(const Tokens &t, std::size_t &pos, std::size_t n, std::size_t degree) {
     if (n > (t.size() - std::min(pos, t.size())) / 2)
         throw DecodeFailure{};
     std::vector<double> out;
     for (std::size_t k = 0; k < n; ++k) {
-        repeat_knot(out, number(t, pos), count(t, pos + 1, clamp));
+        const auto value = number(t, pos);
+        const auto multiplicity = count(t, pos + 1);
+        if (multiplicity > degree + 1 || multiplicity > allocation_limit - out.size())
+            throw DecodeFailure{};
+        out.insert(out.end(), multiplicity, value);
         pos += 2;
     }
     return out;
@@ -137,10 +141,10 @@ void pad(std::vector<double> &k) {
 }
 SatBSplineCurve curve_at(const Tokens &t, std::size_t start, bool uv) {
     bool rational = id(t, start) == "nurbs";
-    auto degree = count(t, start + 1, uv);
-    auto n = count(t, start + 3, uv);
+    auto degree = spline_degree(t, start + 1);
+    auto n = count(t, start + 3);
     auto p = start + 4;
-    auto k = knots(t, p, n, true);
+    auto k = knots(t, p, n, degree);
     if (k.size() < 2 || degree >= k.size())
         throw DecodeFailure{};
     auto stride = std::size_t((uv ? 2 : 3) + (rational ? 1 : 0));
@@ -276,7 +280,7 @@ SatBSplineSurface surface_net(const Tokens &t) {
         throw DecodeFailure{};
     auto s = *last;
     bool rational = id(t, s) == "nurbs";
-    auto du = count(t, s + 1), dv = count(t, s + 2), f = s + 3;
+    auto du = spline_degree(t, s + 1), dv = spline_degree(t, s + 2), f = s + 3;
     if (rational && (id(t, f) == "u" || id(t, f) == "v" || id(t, f) == "both" || id(t, f) == "none"))
         ++f;
     auto string_at = [&](auto i) -> std::optional<std::string> {
@@ -292,8 +296,8 @@ SatBSplineSurface surface_net(const Tokens &t) {
     out.u_singularity = string_at(f + 2);
     out.v_singularity = string_at(f + 3);
     auto nu = count(t, f + 4), nv = count(t, f + 5), pos = f + 6;
-    out.u_knots = knots(t, pos, nu, false);
-    out.v_knots = knots(t, pos, nv, false);
+    out.u_knots = knots(t, pos, nu, du);
+    out.v_knots = knots(t, pos, nv, dv);
     if (out.u_knots.size() < 2 || out.v_knots.size() < 2 || du >= out.u_knots.size() ||
         dv >= out.v_knots.size())
         throw DecodeFailure{};

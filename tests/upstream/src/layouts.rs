@@ -127,7 +127,10 @@ pub fn verify(input: &str, prefix: &str) -> acadrust::Result<()> {
     assert_eq!(layout(&read("gap")?, "After gap").tab_order, 43);
     let made = read("created")?;
     for name in ["图纸二", "Sheet3"] {
-        compare_layout(layout(&made, name), layout(&input, name));
+        let created = layout(&made, name);
+        let mut expected = layout(&input, name).clone();
+        expected.reactors = vec![created.owner];
+        compare_layout(created, &expected);
         let block = made
             .block_records
             .iter()

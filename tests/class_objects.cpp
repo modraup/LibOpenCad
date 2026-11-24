@@ -1104,7 +1104,62 @@ static void check_class_count(const DxfDocument &d, std::string_view name) {
         }
     check(found, "Missing CLASSES entry");
 }
+static void check_legacy_view_rep_standard(const char *path) {
+    std::ifstream input(path, std::ios::binary);
+    check(bool(input), "Missing legacy R2010 ViewRep fixture");
+    auto drawing = DwgDocument::read(input);
+    constexpr std::uint64_t legacy_id = 0x10000000;
+    constexpr std::uint64_t manager_id = 0x10000001;
+    auto values = [](const DwgDocument &d, std::uint64_t id) {
+        return std::get<ViewRepStandard>(d.class_object(id).value().data).values;
+    };
+    check(values(drawing, legacy_id) == sample_view_rep_standard().values, "Read legacy six-value ViewRep");
+
+    auto legacy = drawing.class_object(legacy_id).value();
+    auto &standard = std::get<ViewRepStandard>(legacy.data);
+    standard.values.front() = 99;
+    legacy.reactors = {manager_id};
+    drawing.update_class_object(legacy);
+    drawing = parse_dwg(dwg_bytes(drawing));
+    check(values(drawing, legacy_id) == standard.values, "Direct edit preserves sixth ViewRep value");
+
+    ClassObject fresh;
+    fresh.data = sample_view_rep_standard();
+    const auto fresh_id = drawing.insert_class_object(fresh);
+    auto expected_fresh = sample_view_rep_standard().values;
+    expected_fresh.back() = 0;
+    check(values(drawing, fresh_id) == expected_fresh, "New R2010 ViewRep stores five values in a mixed drawing");
+    auto edited_fresh = drawing.class_object(fresh_id).value();
+    std::get<ViewRepStandard>(edited_fresh.data).values.back() = 42;
+    drawing.update_class_object(edited_fresh);
+    check(values(drawing, fresh_id) == expected_fresh, "Editing a five-value record retains its layout");
+
+    drawing.remap_class_object_handles({{manager_id, fresh_id}});
+    drawing = parse_dwg(dwg_bytes(drawing));
+    check(values(drawing, legacy_id) == standard.values, "Remapping preserves legacy sixth ViewRep value");
+    check(drawing.class_object(legacy_id)->reactors == std::vector<std::uint64_t>{fresh_id},
+          "Legacy ViewRep reactor was remapped");
+    check(values(drawing, fresh_id) == expected_fresh, "Remapping preserves the five-value layout");
+
+    legacy = drawing.class_object(legacy_id).value();
+    auto &remapped_standard = std::get<ViewRepStandard>(legacy.data);
+    remapped_standard.values.back() = 0;
+    drawing.update_class_object(legacy);
+    drawing = parse_dwg(dwg_bytes(drawing));
+    legacy = drawing.class_object(legacy_id).value();
+    auto &reopened_standard = std::get<ViewRepStandard>(legacy.data);
+    check(reopened_standard.values.back() == 0, "Legacy sixth ViewRep value can be set to zero");
+    reopened_standard.values.back() = 17;
+    drawing.update_class_object(legacy);
+    drawing = parse_dwg(dwg_bytes(drawing));
+    check(values(drawing, legacy_id) == reopened_standard.values, "Zero does not erase the legacy sixth field");
+}
+
 int main(int argc, char **argv) try {
+    if (argc == 3 && std::string_view(argv[1]) == "--legacy-viewrep") {
+        check_legacy_view_rep_standard(argv[2]);
+        return 0;
+    }
     if (argc != 2)
         return 2;
     const std::string prefix = argv[1];
@@ -1731,7 +1786,29 @@ int main(int argc, char **argv) try {
     auto rapid_2013_id = ac1027.insert_class_object(rapid_2013);
     check(std::get<RapidRtRenderSettings>(ac1027.class_object(rapid_2013_id)->data).base.class_version == 2,
           "DWG AC1027 RapidRT class version");
+    ClassObject standard;
+    standard.data = sample_view_rep_standard();
+    const auto standard_2013_id = ac1027.insert_class_object(standard);
+    check_view_rep_standard(std::get<ViewRepStandard>(ac1027.class_object(standard_2013_id)->data));
     write_file(prefix + "-ac1027.dwg", dwg_bytes(ac1027));
+    std::istringstream ac1024_in(create_dwg(DxfVersion::AC1024, {}));
+    auto ac1024 = DwgDocument::read(ac1024_in);
+    const auto standard_2010_id = ac1024.insert_class_object(standard);
+    ClassObject manager_without_source;
+    manager_without_source.data = ViewRepSourceManager{false, 0, 42};
+    const auto manager_id = ac1024.insert_class_object(manager_without_source);
+    const auto ac1024_bytes = dwg_bytes(ac1024);
+    std::istringstream ac1024_saved(ac1024_bytes);
+    auto reopened_2010 = DwgDocument::read(ac1024_saved);
+    auto expected_2010 = sample_view_rep_standard().values;
+    expected_2010.back() = 0;
+    check(std::get<ViewRepStandard>(reopened_2010.class_object(standard_2010_id)->data).values ==
+              expected_2010,
+          "DWG AC1024 ViewRep standard has five values");
+    const auto source_manager = std::get<ViewRepSourceManager>(reopened_2010.class_object(manager_id)->data);
+    check(!source_manager.has_source && source_manager.source == 0 && source_manager.status == 42,
+          "DWG ViewRep source manager without a source");
+    write_file(prefix + "-ac1024.dwg", ac1024_bytes);
     std::istringstream ac1015_in(create_dwg(DxfVersion::AC1015, {}));
     auto ac1015 = DwgDocument::read(ac1015_in);
     bool dwg_legacy = false;

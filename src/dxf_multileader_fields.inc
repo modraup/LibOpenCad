@@ -64,7 +64,7 @@ void mleader_read_fields(MLFields &f, MultiLeaderContext &v) {
     v.line_spacing_factor = f.r(45, v.line_spacing_factor);
     v.line_spacing_style = f.e(170, v.line_spacing_style, 1, 2);
     v.text_color = f.c(90, v.text_color);
-    v.text_attachment_point = f.e(171, v.text_attachment_point, 1, 3);
+    v.text_attachment_point = f.e(171, v.text_attachment_point, 1, 9);
     v.text_flow_direction = f.e(172, v.text_flow_direction, 1, 5);
     v.background_fill_color = f.c(91, v.background_fill_color);
     v.background_scale_factor = f.r(141, v.background_scale_factor);
@@ -124,7 +124,7 @@ void mleader_write_fields(MLFields &f, const MultiLeaderContext &v) {
             throw std::invalid_argument("Invalid MULTILEADER line_spacing_style");
         f.put_i(170, v.line_spacing_style);
         f.put_c(90, v.text_color);
-        if (v.text_attachment_point < 1 || v.text_attachment_point > 3)
+        if (v.text_attachment_point < 1 || v.text_attachment_point > 9)
             throw std::invalid_argument("Invalid MULTILEADER text_attachment_point");
         f.put_i(171, v.text_attachment_point);
         if (v.text_flow_direction < 1 || v.text_flow_direction > 5)
@@ -198,7 +198,7 @@ void mleader_read_fields(MLFields &f, MultiLeaderDefinition &v) {
     v.enable_annotation_scale = f.b(293, v.enable_annotation_scale);
     v.text_direction_negative = f.b(294, v.text_direction_negative);
     v.text_align_in_ipe = f.i(178, v.text_align_in_ipe);
-    v.text_attachment_point = f.e(179, v.text_attachment_point, 1, 3);
+    v.text_attachment_point = f.e(179, v.text_attachment_point, 1, 9);
     v.text_attachment_direction = f.e(271, v.text_attachment_direction, 0, 1);
     v.text_bottom_attachment = f.e(272, v.text_bottom_attachment, 0, 10);
     v.text_top_attachment = f.e(273, v.text_top_attachment, 0, 10);
@@ -248,7 +248,7 @@ void mleader_write_fields(MLFields &f, const MultiLeaderDefinition &v) {
     f.put_b(293, v.enable_annotation_scale);
     f.put_b(294, v.text_direction_negative);
     f.put_i(178, v.text_align_in_ipe);
-    if (v.text_attachment_point < 1 || v.text_attachment_point > 3)
+    if (v.text_attachment_point < 1 || v.text_attachment_point > 9)
         throw std::invalid_argument("Invalid MULTILEADER text_attachment_point");
     f.put_i(179, v.text_attachment_point);
     if (v.text_attachment_direction < 0 || v.text_attachment_direction > 1)

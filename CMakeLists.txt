@@ -1686,6 +1686,8 @@ if(libopencad_build_tests)
     set(class_objects_output "${CMAKE_CURRENT_BINARY_DIR}/class-objects")
     add_test(NAME class_objects COMMAND class_objects_test "${class_objects_output}")
     set_tests_properties(class_objects PROPERTIES FIXTURES_SETUP class_objects)
+    add_test(NAME class_objects_legacy_viewrep COMMAND class_objects_test --legacy-viewrep
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dwg/review/viewrep-standard-legacy-AC1024.dwg")
     if(LIBOPENCAD_TEST_UPSTREAM)
         add_test(NAME upstream_class_objects COMMAND cargo run --locked
             --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/tests/upstream/Cargo.toml"

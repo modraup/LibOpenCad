@@ -309,7 +309,7 @@ struct ClassObjectWriter {
                 str(value.formatted);
         }
     }
-    void write(const ClassObjectData &data) {
+    void write(const ClassObjectData &data, bool legacy_view_rep_sixth_value) {
         if (auto *settings = std::get_if<RenderSettings>(&data)) {
             write_render_settings(*settings, false, v >= 1027);
             return;
@@ -791,13 +791,16 @@ struct ClassObjectWriter {
         }
         if (auto *manager = std::get_if<ViewRepSourceManager>(&data)) {
             bit(manager->has_source);
-            href(2, manager->source);
+            if (manager->has_source)
+                href(2, manager->source);
             main.bit_long(manager->status);
             return;
         }
         if (auto *standard = std::get_if<ViewRepStandard>(&data)) {
-            for (auto item : standard->values)
-                main.bit_long(item);
+            const auto count = v >= 1027 || legacy_view_rep_sixth_value ? standard->values.size()
+                                                                       : standard->values.size() - 1;
+            for (std::size_t i = 0; i < count; ++i)
+                main.bit_long(standard->values[i]);
             return;
         }
         if (std::holds_alternative<ViewRepOrientationDefinition>(data))
@@ -894,7 +897,8 @@ struct ClassObjectWriter {
             href(5, section);
     }
 };
-std::string encode_class_object(unsigned v, const char *page, int type, const ClassObject &rec) {
+std::string encode_class_object(unsigned v, const char *page, int type, const ClassObject &rec,
+                                bool legacy_view_rep_sixth_value = false) {
     ClassObjectWriter w;
     w.v = v;
     w.page = page;
@@ -903,7 +907,7 @@ std::string encode_class_object(unsigned v, const char *page, int type, const Cl
                     std::holds_alternative<ViewRep>(rec.data);
     auto split = object_prefix(w.main, w.refs, v, type, rec.handle, rec.owner,
                                rec.xdictionary_handle.value_or(0), rec.reactors, relative);
-    w.write(rec.data);
+    w.write(rec.data, legacy_view_rep_sixth_value);
     return finish_object(w.main, w.strings, w.refs, v, split);
 }
 std::uint64_t named_object_dictionary(const DwgR2000Objects &o) {
@@ -916,17 +920,23 @@ std::uint64_t named_object_dictionary(const DwgR2000Objects &o) {
 } // namespace
 std::string detail::edit_dwg_class_objects(std::string_view file, const DwgR2000Objects &o,
                                            const std::vector<ClassObject> &records) {
-    auto v = unsigned(dxf_version_from_string(file.substr(0, 6)));
+    const LifecycleStorage storage(file);
     LifecycleEdits edits;
     for (const auto &rec : records) {
         require(o.class_objects.count(rec.handle), "Missing class object");
         require(o.records.count(rec.handle), "Missing class object record");
         if (rec.dxf_name != o.class_objects.at(rec.handle).dxf_name)
             throw std::invalid_argument("Class object name mismatch");
-        edits[rec.handle] =
-            encode_class_object(v, drawing_code_page(file, v), o.records.at(rec.handle).type, rec);
+        auto source_record = o.records.at(rec.handle);
+        bool legacy_view_rep_sixth_value = false;
+        if (storage.version < 1027 && std::holds_alternative<ViewRepStandard>(rec.data)) {
+            read_class_object_record(storage.body(o, rec.handle), source_record, rec.handle, storage.version,
+                                     storage.page, rec.dxf_name, &legacy_view_rep_sixth_value);
+        }
+        edits[rec.handle] = encode_class_object(storage.version, storage.page, source_record.type, rec,
+                                               legacy_view_rep_sixth_value);
     }
-    return lifecycle_rewrite(file, o, edits, {}, {});
+    return lifecycle_rewrite(file, storage, o, edits, {}, {});
 }
 std::string detail::add_dwg_class_object(std::string_view file, const DwgR2000Objects &o, ClassObject rec,
                                          std::uint64_t &id) {

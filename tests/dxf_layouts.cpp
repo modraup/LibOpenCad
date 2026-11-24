@@ -130,6 +130,17 @@ int main(int argc, char **argv) {
         check(gaps.get_layout("After gap")->definition().tab_order == 43, "layout after sparse tab orders");
         write(gaps, prefix + "-gap.dxf");
         verify(made);
+        auto saved_layouts = records(save(made), binary);
+        for (const auto name : {"Model", "Layout1", "图纸二", "Sheet3"}) {
+            const auto *layout = made.get_layout(name);
+            check(layout != nullptr, "missing new layout");
+            const auto &record = at(saved_layouts, layout->handle());
+            const Record header{{0, "LAYOUT"}, {5, layout->handle()}, {102, "{ACAD_REACTORS"},
+                                {330, layout->owner_handle()}, {102, "}"}, {330, layout->owner_handle()},
+                                {100, "AcDbPlotSettings"}};
+            check(record.size() >= header.size() && std::equal(header.begin(), header.end(), record.begin()),
+                  "layout dictionary reactor");
+        }
         check(made.reference_issues().empty(), "created layout references");
         write(made, prefix + "-created.dxf");
         failure(made, [&] { made.add_layout("sheet3"); });

@@ -127,6 +127,29 @@ int main(int argc, char **argv) {
                 made.add_multileader(definition(block, style, text, b), o);
             }
         write(made, prefix + "-created.dxf");
+        auto anchored = DxfDocument::create(binary);
+        for (int attachment = 1; attachment <= 9; ++attachment) {
+            MultiLeaderDefinition v;
+            v.text_attachment_point = attachment;
+            v.context.has_text_contents = true;
+            v.context.text_attachment_point = 10 - attachment;
+            anchored.add_multileader(v);
+        }
+        auto roundtrip = read(save(anchored));
+        std::set<int> attachments;
+        roundtrip.for_each<DxfMultiLeader>([&](const auto &leader) {
+            const auto result = leader.definition();
+            check(result.text_attachment_point + result.context.text_attachment_point == 10,
+                  "multileader MTEXT attachment roundtrip");
+            attachments.insert(result.text_attachment_point);
+        });
+        check(attachments == std::set<int>{1, 2, 3, 4, 5, 6, 7, 8, 9}, "all nine attachment points");
+        write(anchored, prefix + "-attachment-points.dxf");
+        fails(made, [&] {
+            auto v = definition(block, style, text, false);
+            v.context.text_attachment_point = 10;
+            made.add_multileader(v);
+        });
         std::ifstream in(argv[2], std::ios::binary);
         auto d = DxfDocument::read(in);
         auto sources = d.model_space_entity_handles();

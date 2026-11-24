@@ -151,14 +151,11 @@ struct LifecycleRecoverySource {
     const DwgR2000Index &index;
 };
 // Rebuild records and offset map together; opaque survivors and gaps remain byte-for-byte.
-std::string lifecycle_rewrite(std::string_view file, const DwgR2000Objects &o, const LifecycleEdits &edits,
+std::string lifecycle_rewrite(std::string_view file, const LifecycleStorage &s, const DwgR2000Objects &o,
+                              const LifecycleEdits &edits,
                               const std::set<std::uint64_t> &removed, const LifecycleEdits &added,
                               const std::optional<std::string> &header = {}, std::uint64_t next = 0,
-                              const LifecycleRecoverySource *recovery = nullptr) {
-    std::optional<LifecycleStorage> current;
-    if (!recovery)
-        current.emplace(file);
-    const auto &s = recovery ? recovery->storage : *current;
+                              const DwgR2000Index *recovered_index = nullptr) {
     auto v = s.version;
     std::map<std::size_t, std::uint64_t> order;
     for (auto &[h, r] : o.records)
@@ -215,7 +212,7 @@ std::string lifecycle_rewrite(std::string_view file, const DwgR2000Objects &o, c
             try {
                 return read_dwg_paged_section(file, name);
             } catch (const std::invalid_argument &error) {
-                if (!recovery || std::string_view(error.what()) != "DWG section not found")
+                if (!recovered_index || std::string_view(error.what()) != "DWG section not found")
                     throw;
                 return std::nullopt;
             }
@@ -235,9 +232,9 @@ std::string lifecycle_rewrite(std::string_view file, const DwgR2000Objects &o, c
         return replace(file, sections);
     }
     std::optional<DwgR2000Index> current_index;
-    if (!recovery)
+    if (!recovered_index)
         current_index = read_dwg_linear_index(file);
-    const auto &idx = recovery ? recovery->index : *current_index;
+    const auto &idx = recovered_index ? *recovered_index : *current_index;
     auto map = idx.sections.at(2);
     struct Change {
         std::size_t length;
@@ -317,6 +314,14 @@ std::string lifecycle_rewrite(std::string_view file, const DwgR2000Objects &o, c
     }
     set_crc(out, 0, 25 + 9 * idx.sections.size());
     return out;
+}
+std::string lifecycle_rewrite(std::string_view file, const DwgR2000Objects &o, const LifecycleEdits &edits,
+                              const std::set<std::uint64_t> &removed, const LifecycleEdits &added,
+                              const std::optional<std::string> &header = {}, std::uint64_t next = 0,
+                              const LifecycleRecoverySource *recovery = nullptr) {
+    if (recovery)
+        return lifecycle_rewrite(file, recovery->storage, o, edits, removed, added, header, next, &recovery->index);
+    return lifecycle_rewrite(file, LifecycleStorage(file), o, edits, removed, added, header, next);
 }
 const DwgHistoryRecord *lifecycle_object(const DwgR2000Objects &o, std::uint64_t h) {
     auto m = o.metadata_records.find(h);

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // acadrust entities/acis/writer.rs: spline/pcurve builders and bs3_tokens.
 #include <libopencad/acis.hpp>
+#include "acis_spline_limits.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -20,14 +21,15 @@ void finite(double n) {
         throw std::invalid_argument("Non-finite ACIS spline builder value");
 }
 std::size_t axis_count(std::int32_t degree, const KnotRuns &knots) {
-    if (degree < 0 || knots.size() < 2)
+    if (degree < 0 || degree > max_acis_spline_degree || knots.size() < 2)
         throw std::invalid_argument("Invalid spline degree or knot runs");
     std::size_t sum = 0;
     double last = -std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < knots.size(); ++i) {
         auto [k, m] = knots[i];
         finite(k);
-        if (k < last || m < 0 || ((i == 0 || i + 1 == knots.size()) && m < 1) ||
+        const bool endpoint = i == 0 || i + 1 == knots.size();
+        if (k < last || m < (endpoint ? 1 : 0) || m - endpoint > degree + 1 ||
             std::size_t(m) > (1u << 20) - sum)
             throw std::invalid_argument("Invalid spline knot multiplicity or ordering");
         sum += std::size_t(m);

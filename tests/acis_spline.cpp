@@ -225,7 +225,7 @@ static void verify_builders(const std::string &input, const std::string &prefix)
 static void boundaries() {
     auto document = SatDocument::new_body();
     auto before = document.to_sat_string();
-    for (int failure = 0; failure < 5; ++failure) {
+    for (int failure = 0; failure < 7; ++failure) {
         bool rejected = false;
         try {
             if (failure == 0)
@@ -241,6 +241,10 @@ static void boundaries() {
             }
             if (failure == 4)
                 document.add_spline_curve(false, 1, false, {{0, 2}, {1, 2}}, {{0, 0, 0}, {1, INFINITY, 1}});
+            if (failure == 5)
+                document.add_spline_curve(false, 65, false, {{0, 66}, {1, 66}}, std::vector<Vector3>(66));
+            if (failure == 6)
+                document.add_spline_curve(false, 1, false, {{0, 2}, {.5, 3}, {1, 2}}, std::vector<Vector3>(5));
         } catch (const std::invalid_argument &) {
             rejected = true;
         }
@@ -263,12 +267,12 @@ static void boundaries() {
     check(reject, "sampling resource limit");
     {
         auto high = SatDocument::new_body();
-        auto id =
-            high.add_spline_curve(false, 8192, false, {{0, 8193}, {1, 8193}}, std::vector<Vector3>(8193));
+        auto id = high.add_spline_curve(false, 64, false, {{0, 65}, {1, 65}}, std::vector<Vector3>(65));
         auto view = SatIntCurve::from_record(*high.record(id));
+        check(view && view->sample(1).size() == 2, "maximum spline degree");
         bool limited = false;
         try {
-            view->sample(1);
+            view->sample(16000);
         } catch (const std::length_error &) {
             limited = true;
         }
@@ -283,6 +287,7 @@ static void boundaries() {
          {"{ ref 999999 }", "{ ref -1 }", "{ exactcur full nubs -1 open 2 0 1 1 1 0 0 0 1 2 3 }",
           "{ exactcur full nubs 1 open 2 0 9223372036854775807 1 1 0 0 0 1 2 3 }",
           "{ exactcur full nubs 1 open 100 0 1 }", "{ exactcur full nubs 999999 open 0 }",
+          "{ exactcur full nubs 1 open 2 0 3 1 1 0 0 0 1 2 3 }",
           "{ exactcur full nubs 1 open 2 0 0 1 0 }"}) {
         auto malformed = parse(std::string("-0 intcurve-curve $-1 -1 $-1 forward ") + body + " I I #");
         auto view = SatIntCurve::from_record(malformed.records[0]);
@@ -292,6 +297,15 @@ static void boundaries() {
     auto shared = parse("-0 spline-surface $-1 -1 $-1 forward { ref 0 } I I I I #");
     auto s = SatSplineSurface::from_record(shared.records[0]);
     check(!s->bspline(shared), "unresolved surface ref");
+    auto invalid_pcurve = parse("-0 pcurve $-1 -1 $-1 0 forward { exppc nubs -1 open 2 "
+                                "0 1 1 1 0 0 1 1 0 } 2 -3 #");
+    auto uv = SatPCurve::from_record(invalid_pcurve.records[0]);
+    check(uv && !uv->bspline_in(invalid_pcurve), "negative pcurve degree");
+    auto invalid_surface = parse("-0 spline-surface $-1 -1 $-1 forward { exactsur full nubs 1 1 "
+                                 "open open none none 2 2 0 3 1 1 0 1 1 1 "
+                                 "0 0 0 1 0 0 2 0 0 0 1 1 1 1 2 2 1 3 0 } I I I I #");
+    auto invalid_net = SatSplineSurface::from_record(invalid_surface.records[0]);
+    check(invalid_net && !invalid_net->bspline(invalid_surface), "surface knot multiplicity");
     // Every prefix of a valid record is safe to inspect, including grouped SAB tokens.
     auto full = parse("-0 spline-surface $-1 -1 $-1 forward { exactsur full nubs 1 1 open open none none 2 2 "
                       "0 1 1 1 0 1 1 1 0 0 0 1 0 0 0 1 1 1 1 2 0 } I I I I #");

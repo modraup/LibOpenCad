@@ -43,3 +43,11 @@ identical duplicates, per-owner diagnostics, neighbor preservation and
 atomic refusal of edits to ambiguous geometry. These malformed/opaque cases
 use independent assertions: Rust's current AcDs marker scanning and owner
 truncation are known limitations, not correctness oracles.
+
+## Legacy ViewRep
+
+`viewrep-standard-legacy-AC1024.dwg` was generated with LibOpenCad before the
+five-value R2010 ViewRep change. It starts from a blank R2010 drawing and
+contains an `ACDBVIEWREPSTANDARD` at handle `0x10000000` with values 1 through
+6, followed by a source manager. The native regression uses this file to
+verify that editing and handle remapping preserve its sixth field.

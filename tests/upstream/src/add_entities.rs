@@ -7,6 +7,7 @@ use std::io::Cursor;
 pub fn verify(format: &str, path: &str) -> acadrust::Result<()> {
     // Construct the same drawing independently through the upstream public API.
     let mut reference = CadDocument::new();
+    crate::defaults::add_default_layout_reactors(&mut reference);
     reference.header.insertion_units = 4;
     let mut layer = Layer::with_color("标注", Color::Index(2));
     layer.handle = reference.allocate_handle();

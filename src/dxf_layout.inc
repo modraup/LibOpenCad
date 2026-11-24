@@ -409,8 +409,9 @@ std::uint64_t DxfDocument::add_layout(std::string name) {
     staged.records_.insert(staged.records_.begin() + *position, boundaries.begin(), boundaries.end());
     staged.rebuild_indexes();
     DxfLayout layout;
-    static_cast<DxfRecord &>(layout) = staged.make_record("LAYOUT", "AcDbPlotSettings");
-    layout.pairs_.push_back({100, "AcDbLayout"});
+    static_cast<DxfRecord &>(layout) = staged.make_record("LAYOUT");
+    layout.pairs_.insert(layout.pairs_.end(), {{5, "0"}, {102, "{ACAD_REACTORS"}, {330, dictionary},
+                                              {102, "}"}, {100, "AcDbPlotSettings"}, {100, "AcDbLayout"}});
     layout.set_text_field("AcDbLayout", 1, name);
     LayoutDefinition definition;
     definition.tab_order = static_cast<std::int16_t>(std::min<int>(INT16_MAX, last_tab.value_or(0) + 1));
