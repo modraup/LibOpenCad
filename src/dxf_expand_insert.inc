@@ -176,7 +176,7 @@ std::vector<std::uint64_t> DxfDocument::expand_insert_into(std::string_view hand
         if (br.short_field("AcDbBlockTableRecord", 280, 1) == 0)
             throw std::invalid_argument("Block is not explodable");
         const DxfBlock *block = nullptr;
-        for_each<DxfBlock>([&](const auto &b) {
+        std::as_const(*this).for_each<DxfBlock>([&](const DxfBlock &b) {
             if (b.owner_handle() == br.handle())
                 block = &b;
         });
