@@ -134,6 +134,8 @@ if(libopencad_build_tests)
     endforeach()
     add_executable(dwg_password_test tests/dwg_password.cpp)
     target_link_libraries(dwg_password_test PRIVATE libopencad)
+    add_test(NAME dwg_password_metadata COMMAND dwg_password_test metadata
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dwg/security/metadata-AC1018.dwg")
     foreach(v IN ITEMS AC1018 AC1021 AC1032)
         set(password_fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dwg/security/${v}.dwg")
         add_test(NAME dwg_password_${v} COMMAND dwg_password_test "${v}" "${password_fixture}"

@@ -338,7 +338,13 @@ std::optional<SectionView> find_section(View catalog, bool ac21, View name, bool
         check(pages <= (catalog.size() - pos) / page_size, "Truncated DWG page descriptors");
         const auto entries = slice(catalog, pos, pages * page_size);
         pos += entries.size();
-        const bool encrypted = (ac21 ? number(desc, 16, 8) : number(desc, 28)) != 0;
+        // In these metadata sections 2 is a format marker, not a password requirement.
+        const auto flag = ac21 ? number(desc, 16, 8) : number(desc, 28);
+        const bool metadata_marker = flag == 2 &&
+            (section_name_matches(stored_name, "AcDb:FileDepList", ac21) ||
+             section_name_matches(stored_name, "AcDb:AppInfo", ac21) ||
+             section_name_matches(stored_name, "AcDb:VBAProject", ac21));
+        const bool encrypted = flag != 0 && !metadata_marker;
         if (any_encrypted && encrypted)
             *any_encrypted = true;
         if (!section_name_matches(stored_name, name, ac21))
@@ -635,7 +641,6 @@ std::string detail::replace_ac18_sections(View file, const std::map<std::string,
         name.resize(name.find('\0') == name.npos ? name.size() : name.find('\0'));
         auto replace = replacements.find(name);
         auto section_id = number(desc, 24);
-        check(!number(desc, 28), "Encrypted DWG rewrite unsupported");
         std::string page_entries;
         auto register_page = [&](std::string &header, View bytes, std::size_t dst) {
             put(header, 8, bytes.size());

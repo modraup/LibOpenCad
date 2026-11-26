@@ -52,6 +52,24 @@ void verify_rejection(const std::string &bytes, const std::optional<std::string>
 } // namespace
 
 int main(int argc, char **argv) try {
+    check(argc >= 2, "expected a DWG test case");
+    if (std::string_view(argv[1]) == "metadata") {
+        check(argc == 3, "expected metadata fixture path");
+        std::ifstream input(argv[2], std::ios::binary);
+        auto document = DwgDocument::read(input);
+        check(document.objects().lines.size() == 1, "ordinary metadata drawing contains one line");
+        const auto line = document.objects().lines.begin()->second;
+        document.set_preview(std::nullopt);
+        std::ostringstream output;
+        document.write(output);
+        std::istringstream reopened(output.str());
+        const auto restored = DwgDocument::read(reopened);
+        check(restored.objects().lines.size() == 1 &&
+                  restored.objects().lines.begin()->second.start == line.start &&
+                  restored.objects().lines.begin()->second.end == line.end,
+              "rewriting metadata-marked DWG preserves line geometry");
+        return 0;
+    }
     check(argc == 4, "expected DWG version and fixture paths");
     const std::string version = argv[1];
     const bool unicode = version == "AC1021";
